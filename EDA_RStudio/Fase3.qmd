@@ -1,0 +1,793 @@
+---
+title: "Predicción de valores y tendencias de cierre del IBEX35 mediante *machine learning* y *webscraping*"
+subtitle: "Fase 3: Normalización y **Feature Engineering**"
+author: "Santiago López Begines"
+date: "`r Sys.Date()`"
+format:
+  html:
+    code-overflow: wrap
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    theme: cosmo
+    embed-resources: true
+    fig-width: 8
+    fig-height: 6
+    df-print: paged
+  pdf:
+    df-print: kable
+    documentclass: article
+    latex_engine: xelatex
+    fontsize: 11pt
+    mainfont: Liberation Sans
+    linestretch: 1
+    geometry:
+      - top=2.5cm
+      - bottom=2.5cm
+      - left=3cm
+      - right=3cm
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    colorlinks: true
+    indent: true
+    fig-pos: 'H'
+    code-overflow: wrap
+    keep-tex: true
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+  freeze: auto
+editor: visual
+---
+
+```{r entorno}
+#| include: false
+rm(list=ls())
+gc()
+source("code/R/00.libraries.R")
+
+#Global variables
+output_path <- "output"
+image_number <- 61
+table_number <- 1
+set.seed(123) # For reproducibility
+# Source general functions
+source("code/R/01.general_functions.R")
+create_directories(output_path)
+source("code/R/02.EDA_functions.R")
+#source("code/R/03.Features_functions.R")
+all_stocks_df <- read_parquet(paste0(output_path,"/tables/all_indices.parquet"))
+#all_companies_df <- read_parquet(paste0(output_path,"/tables/ibex35_companies_all.parquet"))
+# Cargar datos ibex preprocesados
+#ibex <- readRDS("output/RData/ibex_eda_processed.rds")
+#outliers <- readRDS("output/RData/outliers.rds")
+#eventos_clave <- readRDS("output/RData/eventos_clave.rds")
+
+
+# Iniciaar log_file
+log_file <- file.path("output/log", paste0("fase_3_log_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt"))
+
+log_cat("== Iniciando archivo Log Fase 3 ==\n")
+log_cat(paste0("== Fecha: ", format(Sys.time(), "%Y%m%d_%H%M%S"), " ==\n\n"))
+
+```
+
+# Fase 3: Normalización y ***Feature Engineering***
+
+Antes de normalizar y aplicar transformaciones, vamos a separar los datos en train y test.
+El set completo de datos usados es desde el 01-01-2004 hasta el 16-10-2025.
+Usaremos como train los datos hasta el 15-10-2024, y como test los datos del día 16-10-2024 hasta el 16-10-2025.
+Debido a que los datos usados para el análisis de sentimientos abarcarán sólo sdesed el 2020-01-01, para facilitar el análisis, los datasets finales de train y test se filtrarán posteriormente para que empiecen desde esa fecha.
+Debido a que los datos usados ya han sido preprocesados en la fase EDA, sólo seleccionaremos las columnas originales y las ordenaremos por fecha.
+
+A su vez, separaremos sólo las variables origignales ("date", "open", "high", "low", "close", "volume").
+El resto serán calculadas mediante una función específica.
+
+```{r}
+# Seleccionar datos Ibex
+ibex <- all_stocks_df |>
+  dplyr::filter(index == "ibex35") |> 
+  dplyr::select(date, open, high, low, close, volume) |>
+  dplyr::arrange(date)
+
+#Split data
+'
+#Split the 80% for train and 20% for test
+length_ibex <- length(row_number(ibex))
+split_row <- round(length_ibex*0.8)
+train_raw <- ibex[1:split_row,] 
+test_raw <- ibex[(split_row+1):length_ibex ,]
+'
+```
+
+## Calcular Features - Train & Test
+
+```{r features_train_test}
+
+# Ejecutar el script con la función
+source("code/R/04.financial_features.R")
+
+  train_start <- "2004-01-01"
+  train_end <- "2024-10-15"
+  test_start <- "2024-10-16"
+  test_end <- "2025-10-16"
+
+result <- calculate_financial_features_split(
+  df = ibex,  # Dataset completo (train + test juntos)
+  train_start <- train_start,
+  train_end <- train_end,
+  test_start <- test_start,
+  test_end <- test_end,
+  apply_scaling = FALSE,   
+  apply_yj = FALSE         
+)
+
+train <- result$train
+test <- result$test
+stats <- result$stats
+
+log_cat("\n== Dataset: Ibex35 ==\n")
+log_cat("\n== Train dataset ==\n")
+log_cat(paste0("== Starting date: ", train_start, " == ", "End date: ", train_end, "==\n"))
+log_cat("\n== Test dataset ==\n")
+log_cat(paste0("== Starting date: ", test_start, " == ", "End date: ", test_end, "==\n"))
+
+# Dimensiones finales
+log_cat("\n=== DIMENSIONES FINALES ===\n")
+log_cat("Train:", nrow(train), "obs x", ncol(train), "vars\n")
+log_cat("Test:", nrow(test), "obs x", ncol(test), "vars\n")
+```
+
+## Incorporación de variables de otros índices
+
+```{r exogenous_features}
+
+source("code/R/05.external_features.R")
+
+# 1. Definir fechas
+train_start <- "2004-01-01"
+train_end <- "2024-10-15"
+test_start <- "2024-10-16"
+test_end <- "2025-10-16"
+
+# 2. Llamar a la función
+result <- calculate_external_features_split(
+  all_stocks_df = all_stocks_df,
+  indices = get_recommended_indices("extended"),  
+  target_index = "ibex35",
+  train_start = train_start,
+  train_end = train_end,
+  test_start = test_start,
+  test_end = test_end,
+  features_config = get_default_config(),  
+  missing_method = "forward_fill",
+  lag_international = TRUE
+)
+
+# 3. Extraer resultados
+train_features <- result$train
+test_features <- result$test
+train_statistics <- result$stats
+
+# 4. Ver dimensiones
+log_cat(paste0("Dimensiones Train: ",dim(train_features)))
+log_cat(paste0("Dimensiones Train: ",dim(test_features)))
+
+# 5. Ver primeras filas
+head(train_features)
+head(test_features)
+
+# 6. Verificar NAs
+log_cat(paste0("NAs en Train: ",colSums(is.na(train_features))))
+log_cat(paste0("NAs en Test: ",colSums(is.na(test_features))))
+
+# 7. Merge con tus datos originales
+ train_with_external <- train %>%
+   left_join(train_features, by = "date")
+ 
+ test_with_external <- test %>%
+   left_join(test_features, by = "date")
+ 
+# Validar merges
+log_cat(sprintf("\nTrain con externas: %d observaciones, %d variables\n",
+             nrow(train_with_external), ncol(train_with_external)))
+log_cat(sprintf("Test con externas: %d observaciones, %d variables\n",
+             nrow(test_with_external), ncol(test_with_external)))
+
+#save train/test with external
+saveRDS( train_with_external,"output/RData/train_with_external.rds")
+saveRDS( test_with_external,"output/RData/test_with_external.rds")
+ 
+```
+
+### Euribor
+
+Para unir los datos de euribor, se hace uso de la libreria `fedr` de la Reserva Federal de EEUU.
+Mediante API, obtenida previo registro, es posible acceder a diferentes índinces.
+Para el Euribor 3M se hace uso de la clave `IR3TIB01EZM156N`.
+Dado que es un dato que se publica cada mes y que se mantiene estable durante ese periordo, se completan los NA el el valor válido justamente anterior.
+
+```{r}
+#Para obtener API key: Regístrarse gratis en https://fred.stlouisfed.org/docs/api/api_key.html
+
+# Configurar API key (solo primera vez)
+fredr_set_key("399e99f309c87a112f4e4bb45e502578")
+
+# Descargar Euribor a 3M
+euribor <- fredr(
+  series_id = c("IR3TIB01EZM156N"),
+  observation_start = as.Date(train_start),
+  observation_end = as.Date(test_end)
+)
+#guardar copia local
+saveRDS(euribor, file = paste0(output_path,"/RData/euribor_3m.rds"))
+
+
+# Renombrar columnas
+euribor <- euribor %>%
+  dplyr::select(date, value) %>%
+  rename(euribor_3m = value)
+
+# Crear secuencia completa de fechas (días hábiles o todos los días)
+fechas_completas <- data.frame(
+  date = seq(min(euribor$date), max(euribor$date), by = "day")
+)
+
+# Unir y rellenar NA hacia adelante
+euribor_completo <- fechas_completas %>%
+  dplyr::left_join(euribor, by = "date") %>%
+  fill(euribor_3m, .direction = "down")
+
+
+
+# Integrar Euribor en train y test
+train_with_external <- train_with_external %>%
+  left_join(euribor_completo, by = "date")
+test_with_external <- test_with_external %>%
+  left_join(euribor_completo, by = "date")
+
+
+#save train/test with external
+saveRDS( train_with_external,"output/RData/train_with_external.rds")
+saveRDS( test_with_external,"output/RData/test_with_external.rds")
+ 
+# Visualizar Euribor
+p <- ggplot(euribor_completo) +
+  aes(x = date, y = euribor_3m) +
+  geom_line(colour = "#112446") +
+  labs(x = "Año", y = "Euribor 3M") +
+  theme_minimal()
+print(p)
+save_plot("euribor_3m",p)
+
+
+```
+
+Comprobación de variables totales
+
+```{r}
+data.frame(
+  Dataset = c("Train", "Test"),
+  "Numero de Variables" = c(ncol(train_with_external), ncol(test_with_external))
+) %>%
+  kable(caption = "Resumen de datasets")
+
+cat("\n**Variables presentes:**\n")
+cat(paste(colnames(train_with_external), collapse = ", "))
+```
+
+### Checking NAs
+
+```{r check_NAs}
+# Seleccionar train que será usado: 2014-01-01 hasta 2024-10-15
+train_with_external <- train_with_external |>
+  filter(date >= as.Date("2004-01-01") & date <= as.Date("2024-10-15"))
+
+#Serie larga
+#train_with_external <- train_with_external |>
+#  filter(date >= as.Date("2004-01-01") & date <= as.Date("2024-10-15"))
+
+#NA train
+na_counts <- colSums(is.na(train_with_external))
+top_na <- sort(na_counts[na_counts > 0], decreasing = TRUE)
+print(top_na)
+log_cat(top_na)
+
+#Na test
+na_counts <- colSums(is.na(test_with_external))
+top_na <- sort(na_counts[na_counts > 0], decreasing = TRUE)
+print(top_na)
+log_cat(top_na)
+```
+
+## Limpieza de Variables
+
+```{r cleaning_features}
+source("code/R/06.cleaning_features.R")
+
+# Ejecutar limpieza
+cleaned_data <- clean_na_and_redundant(
+  train_df = train_with_external,
+  test_df = test_with_external,
+  na_threshold = 10,
+  vars_to_remove = NULL,  # Puedes añadir variables adicionales aquí
+  verbose = TRUE,
+  targets = c("returns_next", "returns_next_5", "returns_next_10", "returns_next_20")
+)
+
+# Extraer resultados
+train_cleaned <- cleaned_data$train
+test_cleaned <- cleaned_data$test
+
+# Información adicional
+log_cat("\n=== RESUMEN ===\n")
+# Dimensiones finales
+log_cat("\n=== DIMENSIONES FINALES ===\n")
+log_cat("Train:", nrow(train_cleaned), "obs x", ncol(train_cleaned), "vars\n")
+log_cat("Test:", nrow(test_cleaned), "obs x", ncol(test_cleaned), "vars\n")
+# Variables eliminadas
+log_cat("\n=== VARIABLES ELIMINADAS ===\n")
+log_cat("Variables eliminadas:", cleaned_data$n_vars_removed, "\n")
+log_cat("Variables finales:", cleaned_data$n_vars_final, "\n")
+
+log_cat("\nNAs después de limpieza:\n")
+# Conteo de NAs por variable (top 10)
+na_counts <- colSums(is.na(train_cleaned))
+top_na_train <- sort(na_counts[na_counts > 0], decreasing = TRUE)
+log_cat("Train:\n")
+print(top_na_train)
+log_cat(top_na_train)
+
+na_counts <- colSums(is.na(test_cleaned))
+top_na_test <- sort(na_counts[na_counts > 0], decreasing = TRUE)
+log_cat("Test:\n\n")
+print(top_na_test)
+log_cat(top_na_test)
+```
+
+## Imputación de NAs restantes. Caso de cotización del petroleo COVID'19
+
+```{r NA_imputation}
+source("code/R/06.cleaning_features.R")
+#Para la serie larga, filtramos el primer año para evitar los rolling NAs
+train_cleaned <-  train_cleaned |> 
+  dplyr::filter(date>="2005-01-01")
+
+
+
+# Aplicar imputación
+train_cleaned <- impute_oil_covid_nas(train_cleaned, verbose = TRUE)
+test_cleaned <- impute_oil_covid_nas(test_cleaned, verbose = TRUE)
+
+# Verificar que no quedan NAs en esas variables
+log_cat("=== VERIFICACIÓN FINAL ===\n")
+oil_vars <- c("oil_return", "oil_return_lag1", "oil_vol20", 
+              "oil_momentum", "risk_on_score")
+
+for(var in oil_vars) {
+  if(var %in% names(train_cleaned)) {
+    n_na <- sum(is.na(train_cleaned[[var]]))
+    log_cat(sprintf("%s: %d NAs\n", var, n_na))
+  }
+}
+
+# Ver fechas específicas para confirmar
+log_cat("\n=== VALORES IMPUTADOS (sample) ===\n")
+train_cleaned |>
+  filter(date >= as.Date("2020-04-20") & date <= as.Date("2020-05-20")) |>
+  dplyr::select(date, oil_return, oil_vol20, risk_on_score) |>
+  print()
+
+log_cat("\nNAs después de limpieza:\n")
+# Conteo de NAs por variable (top 10)
+na_counts <- colSums(is.na(train_cleaned))
+top_na_train <- sort(na_counts[na_counts > 0], decreasing = TRUE)
+log_cat("Train:\n")
+print(top_na_train)
+log_cat(top_na_train)
+
+na_counts <- colSums(is.na(test_cleaned))
+top_na_test <- sort(na_counts[na_counts > 0], decreasing = TRUE)
+log_cat("Test:\n\n")
+print(top_na_test)
+log_cat(top_na_test)
+```
+
+En el set 'train', debido a que sigue quedando un valor 'NA' en la variable 'oil_return_lag1', producido por el propio procedimiento del cálculo, procederemos a eliminar ese registro, correspondiente al primer registro, '2004-01-02' .
+
+Del mismo modo, en el set 'test', continuan 'return_next' y 'returns_next_5' con 'NAs', las variables target.
+Con respecto a 'oil_return_lag1' procederemos del mismo modo que con el set 'train'.
+
+```{r NA_oil_remove}
+# Eliminar filas con NAs en oil_return_lag1
+train_cleaned <- train_cleaned |>
+  filter(!is.na(oil_return_lag1))
+test_cleaned <- test_cleaned |>
+  filter(!is.na(oil_return_lag1))
+
+# Conteo de NAs por variable (top 10)
+na_counts <- colSums(is.na(train_cleaned))
+top_na_train <- sort(na_counts[na_counts > 0], decreasing = TRUE)
+log_cat("Train:\n")
+log_cat(top_na_train)
+
+na_counts <- colSums(is.na(test_cleaned))
+top_na_test <- sort(na_counts[na_counts > 0], decreasing = TRUE)
+log_cat("Test:\n\n")
+log_cat(top_na_test)
+```
+
+## Limpieza por correlacion y varianza cercana a cero
+
+```{r cleaning_by_correlation}
+source("code/R/06.cleaning_features.R")
+
+# Cargar datos limpios del paso anterior
+# train_step2 <- readRDS("data/processed/train_step2_cleaned.rds")
+# test_step2 <- readRDS("data/processed/test_step2_cleaned.rds")
+
+# Ejecutar reducción
+reduced_data <- reduce_by_correlation_variance(
+  train_df = train_cleaned,
+  test_df = test_cleaned,
+  cor_cutoff = 0.85,
+  save_files = TRUE,
+  output_dir = output_path,
+  verbose = TRUE,
+  targets = c("returns_next", "returns_next_5", "returns_next_10", "returns_next_20")
+)
+
+# Ver resumen
+print(reduced_data)
+
+# Extraer dataframes reducidos
+train_for_rf <- reduced_data$train
+test_for_rf <- reduced_data$test
+
+# Ver variables seleccionadas
+log_cat("\n=== VARIABLES SELECCIONADAS ===\n")
+log_cat(reduced_data$variables_selected)
+
+# Dimensiones finales
+log_cat("\n=== DIMENSIONES FINALES ===\n")
+log_cat("Train:", nrow(train_for_rf), "obs x", ncol(train_for_rf), "vars\n")
+log_cat("Test:", nrow(test_for_rf), "obs x", ncol(test_for_rf), "vars\n")
+
+# Opcional: ver variables eliminadas por tipo
+log_cat("\n=== VARIABLES ELIMINADAS ===\n")
+log_cat("Por correlación alta:\n")
+log_cat(reduced_data$variables_removed_cor)
+log_cat("\nPor varianza baja:\n")
+log_cat(reduced_data$variables_removed_var)
+
+```
+
+## Random Forest para ranking de variables
+
+```{r rf}
+#| eval: true
+#| include: true
+source("code/R/06.cleaning_features.R")
+
+# Ejecutar RF con plots en TIFF y PDF
+rf_results <- rank_features_by_importance(
+  train_df = train_for_rf,
+  test_df = test_for_rf,
+  target_var = "returns_next",
+  ntree = 500,
+  importance_threshold = 90,
+  save_plots = TRUE,
+  save_files = TRUE,
+  output_dir = output_path,
+  plot_formats = c("tiff", "pdf"),  # Guardar en ambos formatos
+  plot_width = 20,
+  plot_height = 16,
+  verbose = TRUE,
+  targets = c("returns_next", "returns_next_5", "returns_next_10", "returns_next_20")
+)
+
+# Acceder a modelo RF directamente
+predictions <- predict(rf_results$rf_model, newdata = test_for_rf)
+```
+
+```{r rf_metrics}
+#| eval: true
+#| include: true
+# MÉTRICAS DE REGRESIÓN (para modelo actual)
+
+# Predicciones
+predictions <- predict(rf_results$rf_model, newdata = test_for_rf)
+actual <- test_for_rf$returns_next
+
+# Eliminar NAs si los hay
+valid_idx <- !is.na(actual) & !is.na(predictions)
+predictions <- predictions[valid_idx]
+actual <- actual[valid_idx]
+
+# Calcular métricas
+
+rmse_val <- caret::RMSE(predictions, actual) 
+mae_val <-  caret::MAE(predictions, actual) 
+mse_val <- rf_results$model_mse
+r2_val <- cor(predictions, actual) ^2
+
+log_cat("=== MÉTRICAS DE REGRESIÓN ===\n")
+log_cat(sprintf("RMSE: %.6f\n", rmse_val))
+log_cat(sprintf("MAE:  %.6f\n", mae_val))
+log_cat(sprintf("MSE:  %.6f\n", mse_val))
+log_cat(sprintf("R²:   %.4f\n", r2_val))
+
+# Visualizar predicciones vs reales
+results_df <- data.frame(
+  actual = actual,
+  predicted = predictions,
+  error = actual - predictions
+)
+
+# Scatter plot
+p1 <- ggplot(results_df, aes(x = actual, y = predicted)) +
+  geom_point(alpha = 0.5, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Predicciones vs Valores Reales",
+    subtitle = sprintf("R² = %.4f | RMSE = %.6f", r2_val, rmse_val),
+    x = "Retornos Reales",
+    y = "Retornos Predichos"
+  ) +
+  theme_minimal()
+
+print(p1)
+save_plot("predicciones_retornos",p1)
+
+# Distribución de errores
+p2 <- ggplot(results_df, aes(x = error)) +
+  geom_histogram(bins = 50, fill = "steelblue", alpha = 0.7) +
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Distribución de Errores",
+    subtitle = sprintf("MAE = %.6f", mae_val),
+    x = "Error (Real - Predicho)",
+    y = "Frecuencia"
+  ) +
+  theme_minimal()
+
+print(p2)
+save_plot("distribucion errores",p2)
+```
+
+### Mantener variables al 90%
+
+```{r rf_90}
+ #Seleccionar hasta 90% importancia acumulada
+
+
+rf_results_90pct <- rank_features_by_importance(
+  train_df = train_for_rf,
+  test_df = test_for_rf,
+  target_var = "returns_next",
+  importance_threshold = 90,
+  ntree = 500,
+  save_plots = TRUE,
+  save_files = TRUE,
+  output_dir = output_path,
+  verbose = TRUE,
+  targets = c("returns_next", "returns_next_5", "returns_next_10", "returns_next_20")
+)
+
+
+# Extraer resultados
+
+# Datasets finales
+train_final <- rf_results_90pct$train
+test_final <- rf_results_90pct$test
+
+# Tabla de importancia
+importance_table <- rf_results_90pct$importance
+
+# Top 10 variables
+top_10 <- head(rf_results_90pct$variables_selected, 10)
+log_cat("\n=== TOP 10 VARIABLES ===\n")
+log_cat(top_10)
+'
+# Comparar diferentes targets
+rf_next1 <- rank_features_by_importance(
+  train_df = train_final,
+  target_var = "returns_next",
+  ntree = 300,
+  verbose = FALSE
+)
+
+rf_next5 <- rank_features_by_importance(
+  train_df = train_final,
+  target_var = "returns_next_5",
+  ntree = 300,
+  verbose = FALSE
+)
+
+log_cat("\nComparación de R²:\n")
+log_cat("returns_next:", round(rf_next1$model_rsquared, 4), "\n")
+log_cat("returns_next_5:", round(rf_next5$model_rsquared, 4), "\n")
+'
+#SaveRDS 
+saveRDS(train_final, file = paste0(output_path,"/RData/train_financiero.rds"))
+saveRDS(test_final, file = paste0(output_path,"/RData/test_financiero.rds"))
+
+
+```
+
+### Tabla resumen reducción variables
+
+```{r}
+# Resumen reducción variables
+reduction_summary <- data.frame(
+  Etapa = c("Inicial","Variables técnicas", "Variables exógenas", "Limpieza", "Post Correlación/
+Varianza", "Post RF 90%"),
+  Variables = c(
+    ncol(ibex),
+    ncol(train),
+    ncol(train_with_external),
+    ncol(train_cleaned),
+    ncol(train_for_rf),
+    ncol(train_final)
+  ),
+cambio_var = c(
+    NA,
+    ncol(train) - ncol(ibex),
+    ncol(train_with_external) - ncol(train),
+    ncol(train_cleaned) - ncol(train_with_external),
+    ncol(train_for_rf) - ncol(train_cleaned),
+    ncol(train_final) - ncol(train_for_rf)
+  ),
+Cambio_pct = c(
+    NA,
+    round((ncol(train) - ncol(ibex)) / ncol(ibex) * 100, 2),
+    round((ncol(train_with_external) - ncol(train)) / ncol(train) * 100, 2),
+    round((ncol(train_cleaned) - ncol(train_with_external)) / ncol(train_with_external) * 100, 2),
+    round((ncol(train_for_rf) - ncol(train_cleaned)) / ncol(train_cleaned) * 100, 2),
+    round((ncol(train_final) - ncol(train_for_rf)) / ncol(train_for_rf) * 100, 2)
+  )
+)
+reduction_summary
+```
+
+## Limpieza del analisis de sentimientos
+
+```{r cleaning_sentiment}
+log_file <- file.path("output/log", paste0("Limpieza_analisis_sentimientos_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt"))
+
+daily_sentiment <- read_parquet("output/analysis_ibex35/ibex35_daily_sentiment.parquet")
+# Separar en sentiment train y test
+daily_sentiment_train <- daily_sentiment |>
+  dplyr::filter(date >= as.Date("2014-01-01") & date <= as.Date
+("2024-10-15"))
+
+daily_sentiment_test <- daily_sentiment |>
+  filter(date > as.Date("2024-10-15"))
+
+# Dimensiones finales
+log_cat("\n=== DIMENSIONES FINALES ===\n")
+log_cat("Train:", nrow(daily_sentiment_train), "obs x", ncol(daily_sentiment_train), "vars\n")
+log_cat("Test:", nrow(daily_sentiment_test), "obs x", ncol(daily_sentiment_test), "vars\n")
+
+
+
+
+# Conteo de NAs por variable (top 10)
+na_counts <- colSums(is.na(daily_sentiment_train))
+top_na <- sort(na_counts[na_counts > 0], decreasing = TRUE)
+print(top_na)
+
+na_counts <- colSums(is.na(daily_sentiment))
+top_na <- sort(na_counts[na_counts > 0], decreasing = TRUE)
+print(top_na)
+```
+
+### Limpieza de NA
+
+```{r Cleaning_NA_sentiment}
+source("code/R/19.cleaning_sentiment.R")
+
+#Mantener variables sd_* imputando NAs
+
+sentiment_cleaned <- clean_sentiment_data(
+  train_df = daily_sentiment_train,
+  test_df = daily_sentiment_test,
+  na_threshold = 10,
+  imputation_method = "median",  # Imputar sd_* con mediana
+  remove_sd_vars = FALSE,        # Mantener sd_*
+  verbose = TRUE
+)
+
+
+# Extraer resultados
+daily_sentiment_train_clean <- sentiment_cleaned$train
+daily_sentiment_test_clean <- sentiment_cleaned$test
+
+
+log_cat("\nNAs después de limpieza:\n")
+# Conteo de NAs por variable (top 10)
+na_counts <- colSums(is.na(daily_sentiment_train_clean))
+top_na_train <- sort(na_counts[na_counts > 0], decreasing = TRUE)
+log_cat("Train:\n")
+print(top_na_train)
+
+na_counts <- colSums(is.na(daily_sentiment_test_clean))
+top_na_test <- sort(na_counts[na_counts > 0], decreasing = TRUE)
+log_cat("Test:\n\n")
+print(top_na_test)
+
+```
+
+### Analisis de Correlación
+
+```{r correlation}
+
+cor_analysis <- analyze_sentiment_correlation(
+  sentiment_df = daily_sentiment_train_clean,
+  cor_cutoff = 0.90,
+  save_plots = TRUE,
+  output_dir = output_path,
+  verbose = TRUE
+)
+
+
+# Ver variables altamente correlacionadas
+if(cor_analysis$n_high_cor > 0) {
+  log_cat("\nVariables recomendadas para eliminar por alta correlación:\n")
+  print(cor_analysis$high_cor_vars)
+}
+
+# 5. Eliminar variables altamente correlacionadas si las hay
+
+if(cor_analysis$n_high_cor > 0) {
+  daily_sentiment_train_final <- daily_sentiment_train_clean |>
+    dplyr::select(-all_of(cor_analysis$high_cor_vars))
+  
+  daily_sentiment_test_final <- daily_sentiment_test_clean |>
+    dplyr::select(-all_of(cor_analysis$high_cor_vars))
+  
+  log_cat("\n=== DATOS FINALES (sin correlaciones altas) ===\n")
+  log_cat("Train:", nrow(daily_sentiment_train_final), "obs x", 
+      ncol(daily_sentiment_train_final), "vars\n")
+  log_cat("Test:", nrow(daily_sentiment_test_final), "obs x", 
+      ncol(daily_sentiment_test_final), "vars\n")
+} else {
+  daily_sentiment_train_final <- daily_sentiment_train_clean
+  daily_sentiment_test_final <- daily_sentiment_test_clean
+  
+  log_cat("\n✓ Sin correlaciones altas, usando datos limpios directamente\n")
+}
+
+
+# Guardar metadata
+saveRDS(list(
+  vars_removed = sentiment_cleaned$vars_removed,
+  high_cor_vars = cor_analysis$high_cor_vars,
+  imputation_method = sentiment_cleaned$imputation_method
+), "output/RData/sentiment_cleaning_metadata.rds")
+
+log_cat("\n=== ARCHIVOS GUARDADOS ===\n")
+log_cat("- sentiment_train_clean.rds\n")
+log_cat("- sentiment_test_clean.rds\n")
+log_cat("- sentiment_cleaning_metadata.rds\n")
+log_cat("\n✓ Limpieza completada\n")
+```
+
+```{r save_RDS_sentiment}
+# 6. Guardar resultados
+
+saveRDS(daily_sentiment_train_final, "output/RData/sentiment_train_clean.rds")
+saveRDS(daily_sentiment_test_final, "output/RData/sentiment_test_clean.rds")
+
+```
+
+## SessionInfo()
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,1470 @@
+---
+title: "Predicción de valores y tendencias de cierre del IBEX35 mediante *machine learning* y *webscraping*"
+subtitle: "Fase 5: Modelado y comparación de modelos"
+author: "Santiago López Begines"
+date: "`r Sys.Date()`"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    theme: cosmo
+    embed-resources: true
+    fig-width: 8
+    fig-height: 6
+    df-print: paged
+  pdf:
+    df-print: kable
+    documentclass: article
+    latex_engine: xelatex
+    fontsize: 11pt
+    mainfont: Liberation Sans
+    linestretch: 1
+    geometry:
+      - top=2.5cm
+      - bottom=2.5cm
+      - left=3cm
+      - right=3cm
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    colorlinks: true
+    indent: true
+    fig-pos: 'H'
+    keep-tex: true
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+  freeze: auto
+editor: visual
+---
+
+```{r entorno}
+#| include: false
+rm(list=ls())
+gc()
+source("code/R/00.libraries.R")
+
+#Global variables
+output_path <- "output"
+image_number <- 76
+table_number <- 27
+set.seed(123) # For reproducibility
+# Source general functions
+source("code/R/01.general_functions.R")
+create_directories(output_path)
+source("code/R/02.EDA_functions.R")
+#source("code/R/03.Features_functions.R")
+all_stocks_df <- read_parquet(paste0(output_path,"/tables/all_indices.parquet"))
+source("code/R/21.forecasting_models.R") #Funciones auxiliares
+source("code/R/22.evaluate_naive_models.R") #Funciones auxiliares
+source("code/R/23.compare_predictions.R") #Funciones auxiliares
+```
+
+# MODELADO
+
+## Modelos Clásicos de Series Temporales:
+
+Los modelos clásicos para series temporales son modelos univariables.
+Por ello, usaremos series temporales con sólo una variable (precio o retorno según el caso).
+Para los modelos 'ARIMA' y 'ARIMAX', usaremos el retorno, ya que es una transformación estacionaria y sin tendencia (valores distribuidos alrededor del 0).
+Además, al ser una log-transformada, su distribución se asemeja a la normal.
+En el caso del modelo ARIMAX, usaremos los retornos de alguno índices internacionales.
+Para el modelo 'Prophet'usaremos el precio de cierre, 'close'.
+
+```{r}
+ibex <- all_stocks_df |> dplyr::filter(index == "ibex35",
+                                       date >= "2004-01-01") |> 
+  dplyr::select(date, close)
+
+
+train <- ibex |>  filter(date<= "2024-10-15")
+test <- ibex |>  filter(date > "2024-10-15")
+```
+
+```{r}
+#Calcular retornos
+train <- train |> 
+  mutate(
+    # Retornos
+    log_return_pct = c(NA, diff(log(close))) * 100
+    ) |>  drop_na()# Para eliminar los NA provocados por el cálculo del retorno, eliminaremos la primera observación
+ 
+
+test <- test |> 
+  mutate(
+    # Retornos
+    log_return_pct = c(NA, diff(log(close))) * 100
+    ) |> drop_na()# Para eliminar los NA provocados por el cálculo del retorno, eliminaremos la primera observación
+ 
+
+
+```
+
+### Modelo Arima
+
+La metodología ARIMA, trata de realizar previsiones acerca de los valores futuros de una variable, utilizando únicamente como información la contenida en los valores pasados de la propia serie temporal.
+Como requisitos, necesitamos que la serie sea estacionaria.
+
+Conversión de la serie a serie temporal
+
+```{r}
+# Convertir a serie temporal
+train_ts <- train |> dplyr::select(log_return_pct)
+train_ts <- ts(train_ts, start=c(2004,01,05), frequency = 252)
+
+plot_returns <- autoplot(train_ts) + ggtitle("Serie temporal de Retorno IBEX35") + theme_minimal()
+save_plot("TS_returns_train", plot_returns)
+print(plot_returns)
+#Descomposición de la serie
+
+
+ save_base_plot(plotname = "TS_train_return_decomponse",
+                plot_function = function() { plot(decompose(train_ts))}
+ )
+
+
+
+
+test_ts <- test |> dplyr::select(log_return_pct)
+test_ts <- ts(test_ts, start=c(2024,10,17), frequency = 252)
+plot_test_returns <- autoplot(test_ts) + ggtitle("Serie temporal de Retorno IBEX35") + theme_minimal()
+save_plot("TS_returns_test", plot_test_returns)
+#Descomposición de la serie test no es posible al albergar únicamente un periodo
+#plot(decompose(test_ts))
+
+
+
+
+```
+
+#### Condición de estacionaridad
+
+Comprobamos la estacionalidad de la serie mediante el test "Augmented Dickey-Fuller" y comprobamos que en el caso de la serie original, el p-value es mayor que 0.05, por lo que se acepta la hipotesis nula, la serie no es estacionaria.
+En el caso de la serie diferenciada si que presenta estacionaridad, con p-value=0.01.
+
+```{r}
+# Estacionaridad de la serie original
+ibex_close <-  all_stocks_df |> dplyr::filter(index == "ibex35",
+                                       date >= "2004-01-01",
+                                       date <= "2024-10-15") |> 
+  dplyr::select(close) |> 
+  ts(start=c(2004,01,05), frequency = 252) 
+
+cat("Test ADF serie 'close' original (train)")
+adf_close <- adf.test(ibex_close)
+print(adf_close)
+cat(sprintf(
+  "\nTest ADF: p-value: %.4f → %s \n\n\n",
+  adf_close$p.value,
+  ifelse(adf_close$p.value < 0.05,
+    "Serie Estacionaria",
+    "Serie NO Estacionaria"
+  )
+))
+
+# Estacionaridad de los retornos
+cat("Test ADF serie 'retornos' train")
+adf_train <- adf.test(train_ts)
+print(adf_train)
+cat(sprintf(
+  "\nTest ADF: p-value: %.4f → %s \n\n\n",
+  adf_train$p.value,
+  ifelse(adf_train$p.value < 0.05,
+    "Serie Estacionaria",
+    "Serie NO Estacionaria"
+  )
+))
+
+```
+
+#### Identificación del modelo ARIMA
+
+Para la identificación del modelo arima podemos usar dos funciones `arima`, donde tenemos que indicar los coeficientes (p,d,q) y la estacionalidad; y `auto.arima`, en dónde ajusta automáticamente dichos coeficientes para obtener el mejor ajuste (mejor AIC o BIC).
+
+```{r}
+# Obtener la primera diferencia
+diff_ts <- diff(train_ts)
+
+# Representar la serie diferenciada
+autoplot(diff_ts) + ggtitle("Primera diferencia de la serie de jubilados")+ theme_minimal()
+
+# Análisis de la serie diferenciada
+# Autocovarianzas y autocorrelaciones
+ggAcf(train_ts) + ggtitle("ACF de la serie original") + theme_minimal()
+# Autocorrelación parcial
+ggPacf(train_ts) + ggtitle("PACF de la serie original") + theme_minimal()
+
+ggAcf(diff_ts) + ggtitle("ACF de la primera diferencia") + theme_minimal()
+# Autocorrelación parcial
+ggPacf(diff_ts) + ggtitle("PACF de la primera diferencia") + theme_minimal()
+```
+
+### Arima
+
+Coeficiente p, orden autorregresivo (AR).
+Lag de corte del PACF de la serie diferenciada dónde deja de ser significativa (se encuentra dentro del intervalo de confianza): 1 Coeficiente d: grado de diferencia, en este caso 1.
+Coeficiente q (Orden MA), Lag de corte de ACF de la serie diferenciada: 2
+
+Coeficientes de estacionalidad: D, diferenciación estacional.
+Si la serie diferenciada es estacionaria, entonces D=1.
+Si no, puede ser necesario aumentar la diferenciación estacional.
+
+P y Q, Ordenes AR y MA estacionales.
+Se observan los cortes en las gráficas ACF y PACF estacionales (en múltiplos de la estacionalidad, en este caso 12, anual) para identificar P y Q.
+Los cortes presentan periodicidad anual, ya que se observan cortes en los lags 1,12,y 24, por lo que P y Q son iguales a 1.
+
+Para la identificación de dichos coeficientes usaremos la función 'autoarima'.
+
+#### AutoArima
+
+```{r}
+# Identificación del modelo ARIMA
+arima_model <- auto.arima(
+  train_ts,
+  seasonal = FALSE,        # No hay estacionalidad clara en retornos diarios
+  stepwise = TRUE,        # Búsqueda exhaustiva (más lento pero mejor)
+  approximation = FALSE,
+  trace = TRUE,            # Mostrar modelos probados
+  ic = "aicc",             # Criterio de información
+  allowmean = FALSE        # Forzar inclusión de media
+)
+# Estimación del modelo ARIMA
+summary(arima_model)
+
+# Evaluación de resultados
+#Histograma de residuos
+hist(arima_model$residuals)
+#Correlación parcial de residuos
+pacf(arima_model$residuals)
+
+tsdiag(arima_model)
+#descomponer::gtd(arima_model$residuals)
+cpgram(arima_model$residuals)
+jarque.bera.test(arima_model$residuals)
+
+checkresiduals(arima_model)
+autoplot(arima_model)
+
+# Forecast
+n_ahead <- nrow(test)
+arima_forecast <- forecast(arima_model, h = n_ahead)
+
+autoplot(arima_forecast) + ggtitle("Pronóstico de retornos para el prómimo año")
+# Foco en 2024
+autoplot(arima_forecast) + ggtitle("Pronóstico de retornos para el prómimo año") + 
+  xlim(2024.5, 2026)
+
+
+# Evaluar
+arima_results <- evaluate_forecast(
+  test$log_return_pct,
+  as.numeric(arima_forecast$mean),
+  "ARIMA"
+)
+
+cat("\n=== RESULTADOS ARIMA ===\n")
+summary(arima_model)
+print(arima_results)
+
+```
+
+¿Por qué ARIMA(0,0,0)?
+El modelo está diciendo: "Los returns del IBEX son ruido blanco puro, no hay patrón autocorrelativo".
+Esto es económicamente razonable (eficiencia de mercado).
+
+```{r}
+# 1. ¿Las predicciones son realmente 0?
+summary(arima_forecast$mean)
+table(arima_forecast$mean)
+
+# 2. Forzar manualmente modelo con media
+arima_with_mean <- Arima(
+  train_ts,
+  order = c(0, 0, 0),
+  include.mean = TRUE
+)
+
+print(arima_with_mean)
+
+# Forecast con media forzada
+arima_forecast_mean <- forecast(arima_with_mean, h = nrow(test))
+
+# Verificar predicciones
+cat("Predicciones con media forzada:\n")
+print(summary(arima_forecast_mean$mean))
+
+# Evaluar
+arima_results_mean <- evaluate_forecast(
+  test$log_return_pct,
+  as.numeric(arima_forecast_mean$mean),
+  "ARIMA_with_mean"
+)
+
+print(arima_results_mean)
+```
+
+#### Visualización
+
+```{r}
+
+# Plot
+arima_plot_data <- data.frame(
+  date = test$date,
+  actual = test$log_return_pct,
+  predicted = as.numeric(arima_forecast$mean),
+  lower_80 = as.numeric(arima_forecast$lower[, 1]),
+  upper_80 = as.numeric(arima_forecast$upper[, 1])
+)
+
+p_arima <- ggplot(arima_plot_data, aes(x = date)) +
+  geom_ribbon(aes(ymin = lower_80, ymax = upper_80), fill = "lightblue", alpha = 0.3) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = predicted, color = "ARIMA"), linewidth = 1, linetype = "dashed") +
+  scale_color_manual(values = c("Actual" = "black", "ARIMA" = "red")) +
+  labs(
+    title = "ARIMA - Predicción vs Real",
+    subtitle = paste0("RMSE: ", round(arima_results$RMSE, 4), 
+                      " | Direction Accuracy: ", round(arima_results$Direction_Accuracy, 2), "%"),
+    x = "Fecha",
+    y = "Log Returns (%)",
+    color = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p_arima)
+save_plot("arima_forecast", p_arima)
+
+```
+
+### Modelo Arimax
+
+Para el modelo ARIMAX usaremos como variables exógenas los siguientes retornos: - S&P500, DAX, VIX, OIL y EuroDollar.
+En primer lugar daremos forma al dataframe a partir de los datos crudos:
+
+```{r}
+# Seleccion de datos
+arimax_data <- all_stocks_df |> 
+  dplyr::filter(date>= "2014-01-01",
+                index %in% c("ibex35", "dax", "s_p500", "euro_dollar", "oil", "volatility_index")) 
+
+# Split train & test
+#Train
+train_max <- arimax_data |> 
+  dplyr::filter(date >= "2014-01-01" & date<= "2024-10-15") |> 
+  dplyr::select(date, close, index) |> 
+  dplyr::group_by(index) |> 
+  dplyr::select(date, index, close) |> 
+  pivot_wider(
+      names_from = index,
+      values_from = close,
+      names_prefix = ""
+    ) |> 
+    arrange(date) |> 
+  janitor::clean_names() |> 
+  mutate(ibex_return = c(NA, diff(log(ibex35))) * 100,
+         sp500_return = c(NA, diff(log(s_p500))) * 100,
+         dax_return = c(NA, diff(log(dax))) * 100,
+         eurodollar_return = c(NA, diff(log(euro_dollar))) * 100,
+         oil_return = c(NA, diff(log(oil))) * 100,
+         vix_return = c(NA, diff(log(volatility_index))) * 100
+         ) |> 
+  dplyr::select(date, ends_with("return")) |> 
+  drop_na()
+
+#Test
+test_max <-  arimax_data |> 
+  dplyr::filter(date >= "2024-10-16")|> 
+  dplyr::select(date, close, index) |> 
+  dplyr::group_by(index) |> 
+  dplyr::select(date, index, close) |> 
+  pivot_wider(
+      names_from = index,
+      values_from = close,
+      names_prefix = ""
+    ) |> 
+    arrange(date) |> 
+  janitor::clean_names() |> 
+  mutate(ibex_return = c(NA, diff(log(ibex35))) * 100,
+         sp500_return = c(NA, diff(log(s_p500))) * 100,
+         dax_return = c(NA, diff(log(dax))) * 100,
+         eurodollar_return = c(NA, diff(log(euro_dollar))) * 100,
+         oil_return = c(NA, diff(log(oil))) * 100,
+         vix_return = c(NA, diff(log(volatility_index))) * 100
+         ) |> 
+  dplyr::select(date, ends_with("return")) |> 
+  drop_na()
+  
+#Corrección del lag. 
+#Usar lag t-1 para predecir t
+
+# Lag de las variables exógenas
+train_max <- train_max |> 
+  mutate(
+    sp500_return_lag1 = lag(sp500_return, 1),
+    dax_return_lag1 = lag(dax_return, 1),
+    vix_return_lag1 = lag(vix_return, 1),
+    oil_return_lag1 = lag(oil_return, 1),
+    eurodollar_return_lag1 = lag(eurodollar_return, 1)
+  ) |> 
+  drop_na()
+
+test_max <- test_max |> 
+  mutate(
+    sp500_return_lag1 = lag(sp500_return, 1),
+    dax_return_lag1 = lag(dax_return, 1),
+    vix_return_lag1 = lag(vix_return, 1),
+    oil_return_lag1 = lag(oil_return, 1),
+    eurodollar_return_lag1 = lag(eurodollar_return, 1)
+  ) |> 
+  drop_na()
+
+
+#Indicar variables exógenas
+# Usar índices externos y VIX (no usar indicadores técnicos del propio IBEX)
+# Usa las variables con lag
+exog_vars_lagged <- c("sp500_return_lag1", "dax_return_lag1", 
+                       "vix_return_lag1", "oil_return_lag1", 
+                       "eurodollar_return_lag1")
+
+
+# Matrices de exógenas
+xreg_train <- as.matrix(train_max[, exog_vars_lagged])
+xreg_test <- as.matrix(test_max[, exog_vars_lagged])
+
+# Crear serie temporal
+ts_train_arimax <- ts(train_max$ibex_return, frequency = 252)
+
+```
+
+```{r}
+#Modelo Arimax
+# Auto.ARIMA con exógenas
+arimax_model <- auto.arima(
+  ts_train_arimax,
+  xreg = xreg_train,
+  seasonal = FALSE,
+  stepwise = TRUE,
+  approximation = TRUE,
+  trace = TRUE,
+  ic = "aicc"
+)
+
+print(arimax_model)
+
+
+# Forecast con exógenas
+arimax_forecast <- forecast(arimax_model, xreg = xreg_test, h = nrow(test_max))
+
+# Evaluar
+arimax_results <- evaluate_forecast(
+  test_max$ibex_return,
+  as.numeric(arimax_forecast$mean),
+  "ARIMAX"
+)
+
+print(arimax_results)
+
+```
+
+#### Visualización
+
+```{r}
+
+# Plot
+arimax_plot_data <- data.frame(
+  date = test_max$date,
+  actual = test_max$ibex_return,
+  predicted = as.numeric(arimax_forecast$mean),
+  lower_80 = as.numeric(arimax_forecast$lower[, 1]),
+  upper_80 = as.numeric(arimax_forecast$upper[, 1])
+)
+
+p_arimax <- ggplot(arimax_plot_data, aes(x = date)) +
+  geom_ribbon(aes(ymin = lower_80, ymax = upper_80), fill = "lightblue", alpha = 0.5) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 1, alpha=0.5) +
+  geom_line(aes(y = predicted, color = "ARIMAX"), linewidth = 1, linetype = "dashed", alpha=0.5) +
+  scale_color_manual(values = c("Actual" = "black", "ARIMAX" = "red")) +
+  labs(
+    title = "ARIMAX - Predicción vs Real (con variables exógenas)",
+    subtitle = paste0("RMSE: ", round(arimax_results$RMSE, 4), 
+                      " | Direction Accuracy: ", round(arimax_results$Direction_Accuracy, 2), "%"),
+    x = "Fecha",
+    y = "Log Returns (%)",
+    color = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p_arimax)
+save_plot("arimax_forecast", p_arimax)
+```
+
+### Modelo Prophet
+
+El modelo Prophet (Facebook) funciona mejor con el precio que con los retornos.
+Usaremos el logaritmo del precio de cierre para estabilizar la varianza.
+
+drop_na() %\>%
+
+dplyr::select(ds
+
+```{r}
+# Preparar los datos en formato Prophet
+train_returns <- train |> 
+  dplyr::select(ds = date, y = log_return_pct)
+
+test_returns <- test  |> 
+  dplyr::select(ds = date, y = log_return_pct)
+
+
+```
+
+```{r}
+#Modelo Prophet
+
+prophet_model <- prophet(
+  train_returns,
+  yearly.seasonality = FALSE,   # No hay estacionalidad anual clara
+  weekly.seasonality = FALSE,    # No hay estacionalidad semanal en retornos
+  daily.seasonality = FALSE,     # No diaria
+  changepoint.prior.scale = 0.05,  # Regularización (evitar overfitting)
+  seasonality.mode = 'additive'
+)
+
+# Forecast
+future <- data.frame(ds = test_returns$ds)
+prophet_forecast <- predict(prophet_model, future)
+
+# Convertir log_close a returns para evaluar
+# returns_pred = exp(log_close_pred) - exp(log_close_actual_lag1)
+# Pero para simplificar, evaluamos directamente log_close
+
+prophet_results <- evaluate_forecast(
+  test_returns$y,
+  prophet_forecast$yhat,
+  "Prophet_return"
+)
+
+cat("\n(Evaluado en returns derivados):\n")
+print(prophet_results)
+```
+
+Esto es sospechoso.
+Prophet predice correctamente un 60%.
+Comprobemos la cuantos días de los 255 son alcistas y cuantos predice prophet
+
+```{r}
+# 1. ¿Cuántos días el mercado subió en test?
+pct_positive <- mean(test_returns$y > 0) * 100
+cat("Días alcistas en test:", pct_positive, "%\n")
+
+# 2. ¿Cuántos días Prophet predijo subida?
+pct_pred_positive <- mean(prophet_forecast$yhat > 0) * 100
+cat("Días que Prophet predijo subida:", pct_pred_positive, "%\n")
+
+# 3. Naive baseline: "siempre predecir subida"
+naive_up_accuracy <- mean((test_returns$y > 0) == TRUE) * 100
+cat("Accuracy prediciendo siempre subida:", naive_up_accuracy, "%\n")
+```
+
+Prophet precide siempre subida (100% de las veces), como en el periodo de test el 59.84% es de subida, entonces prophet acierta el 59.84% de las veces.
+
+#### Visualización
+
+```{r}
+
+# Plot
+prophet_plot_data <- data.frame(
+  ds = test_returns$ds,
+  actual = test_returns$y,
+  predicted = prophet_forecast$yhat,
+  lower = prophet_forecast$yhat_lower,
+  upper = prophet_forecast$yhat_upper
+)
+
+p_prophet <- ggplot(prophet_plot_data, aes(x = ds)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "lightcoral", alpha = 0.3) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = predicted, color = "Prophet"), linewidth = 1, linetype = "dashed") +
+  scale_color_manual(values = c("Actual" = "black", "Prophet" = "red")) +
+  labs(
+    title = "Prophet - Predicción vs Real (log_close)",
+    subtitle = paste0("RMSE: ", round(prophet_results$RMSE, 4), 
+                      " | Direction Accuracy: ", round(prophet_results$Direction_Accuracy, 2), "%"),
+    x = "Fecha",
+    y = "Log(Close Price)",
+    color = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p_prophet)
+save_plot("prophet_forecast", p_prophet)
+
+# Componentes de Prophet (tendencia, estacionalidad)
+prophet_components <- prophet_plot_components(prophet_model, prophet_forecast)
+
+save_base_plot("prophet_components",
+               plot_function = function() {
+                 prophet_plot_components(prophet_model, prophet_forecast)               }
+                 )
+
+
+```
+
+### Comparativa de Modelos Clásicos
+
+```{r}
+
+# Consolidar resultados
+results_comparison <- bind_rows(
+  arima_results,
+  arima_results_mean,
+  arimax_results,
+  prophet_results  # Usando returns derivados
+)
+
+# Ordenar por RMSE
+results_comparison <- results_comparison %>%
+  arrange(RMSE)
+
+print(results_comparison)
+
+# Plot comparativo
+p_comparison <- ggplot(results_comparison, aes(x = reorder(model, -Direction_Accuracy), 
+                                                y = Direction_Accuracy, fill = model)) +
+  geom_col(alpha = 0.8) +
+  geom_text(aes(label = paste0(round(Direction_Accuracy, 2), "%")), 
+            vjust = -0.5, size = 3) +
+  geom_hline(yintercept = 50, linetype = "dashed", color = "red", linewidth = 1) +
+  labs(
+    title = "Comparativa: Direction Accuracy de Modelos de Series Temporales",
+    subtitle = "Línea roja = 50% (azar)",
+    x = "Modelo",
+    y = "Direction Accuracy (%)",
+    fill = "Modelo"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+print(p_comparison)
+save_plot("comparación_modelos_clasicos", p_comparison)
+```
+
+#### Conversión a prediciones de clasificación
+
+Convertiremos la lista de predicciones de un problema de regresión a uno de clasificación.
+Tomaremos que si el retorno predicho es \>0, colocaremos la clase "1", y si el retorno es negativo, colocaremos la clase "0".
+Con esto podremos obtener todas las métricas de una matríz de confusión y podremos comparar los modelos más adelante con aquellos obtenidos mediante ML en python.
+
+```{r}
+n_total <- length(test$log_return_pct)
+n_arimax <- length(arimax_forecast$mean)
+n_na <- n_total - n_arimax
+
+predictions <- data.frame( y_tst = test$log_return_pct, 
+                           y_arima = arima_forecast$mean, 
+                           y_arima_mean = arima_forecast_mean$mean, 
+                           y_arimax = c(rep(NA, n_na), arimax_forecast$mean), 
+                           y_prophet = prophet_forecast$yhat)
+```
+
+```{r}
+# Aplicar la función a cada columna de predicciones
+models <- c("y_arima", "y_arima_mean", "y_arimax", "y_prophet")
+# Crear lista separada para cada modelo
+results_classic_list <- list()
+
+for (model in models) {
+  result <- regression_to_classification(
+    y_true_regression = predictions$y_tst,
+    y_pred_regression = predictions[[model]]
+  )
+  
+  if (!is.null(result)) {
+    results_classic_list[[model]] <- list(
+      name = model,
+      dataset = "financial_long",
+      target = "direction_next",
+      y_true = result$y_true_class,
+      y_pred = result$y_pred_class
+    )
+  }
+}
+
+
+# Nombrar los elementos de la lista
+names(results_classic_list) <- models
+# Verificar longitudes
+lapply(results_classic_list, function(x) {
+  cat("Model:", x$name, "| y_true:", length(x$y_true), 
+      "| y_pred:", length(x$y_pred), "\n")
+})
+
+```
+
+#### Comprabión de modelos clásicos naïve (ingenuos)
+
+¿Como podemos saber si la predicción de un modelo es real?
+
+Tenemos varias métricas.
+En un modelo que siempre predice subidas
+
+```{r}
+source("code/R/22.evaluate_naive_models.R")
+# Evaluar
+naive_models_results <- evaluate_all_models(results_classic_list)
+naive_models_results
+
+```
+
+## Modelos Avanzados de ML (Python)
+
+Estos modelos han sido programados en python y sus resultados guardados en ficheros parquet.
+Para acceder a estos modelos, dirigirse a `py_project/results/csv/` y al jupyter notebook `py_project/pipeline_ML_ibex35.ipynb`, el cual ha sido ejecutado en Colab.
+A continuación cargaremos dichos resultados y los evaluaremos usando las mismas funciones que hemos usado para los modelos clásicos.
+
+| Problema | Datos | Modelos | N |
+|----|----|----|----|
+| Regresión | Scaled | Linear, Ridge, Random Forest, XGBoost, LightGBM, Ensemble, Multi-Layer Perceptron, Gated Recurrent Unit, Long Short-Term Memory | 9 |
+| Regresión | Unscaled | Random Forest, XGBoost, LightGBM, Ensemble, Gated Recurrent Unit, Long Short-Term Memory | 6 |
+| Clasificación | Scaled | Logistic, Random Forest, XGBoost, LightGBM, Ensemble, Multi-Layer Perceptron, Gated Recurrent Unit, Long Short-Term Memory | 8 |
+| Clasificación | Unscaled | Random Forest, XGBoost, LightGBM, Ensemble, Gated Recurrent Unit, Long Short-Term Memory | 6 |
+
+: Modelos propuestos por tipo de problema y escalado Z-score de datos
+
+| Dataset | Tipo | Descripción |
+|----|----|----|
+| financial_scaled | Scaled | Variables financieras normalizadas |
+| financial_unscaled | Unscaled | Variables financieras sin normalizar |
+| financial_long_scaled | Scaled | Serie larga financiera normalizada |
+| financial_long_unscaled | Unscaled | Serie larga financiera sin normalizar |
+| sentiment_scaled | Scaled | Variables financieras + sentimiento normalizadas |
+| sentiment_unscaled | Unscaled | Variables financieras + sentimiento sin normalizar |
+
+| Problema      | Datos    | Datasets | Targets | Modelos |   Total |
+|---------------|----------|:--------:|:-------:|:-------:|--------:|
+| Regresión     | Scaled   |    3     |    4    |    9    |     108 |
+| Regresión     | Unscaled |    3     |    4    |    6    |      72 |
+| Clasificación | Scaled   |    3     |    4    |    8    |      96 |
+| Clasificación | Unscaled |    3     |    4    |    6    |      72 |
+| **TOTAL**     |          |          |         |         | **348** |
+
+### Cargar resultados de predicciones y comparativa de modelos generados en Python.
+
+Resultados generados con el pipeline en Python y ejecutados en Colab.
+Posteriormente, los resultados han sido descargados y almacenados en local.
+
+```{r}
+#Cargar resultados generales
+regression_results <- read_parquet("../../py_project/results/csv/all_regression_results.parquet")
+classification_results <- read_parquet("../../py_project/results/csv/all_classification_results.parquet")
+#Convertir character a factor
+regression_results <- regression_results |> 
+    dplyr::mutate(across(where(is.character), as.factor))
+
+classification_results <- classification_results |> 
+    dplyr::mutate(across(where(is.character), as.factor)) 
+
+
+# Cargar Predicciones
+regression_predictions <- read_parquet("../../py_project/results/csv/predictions_regression.parquet")
+classification_predictions <- read_parquet("../../py_project/results/csv/predictions_classification.parquet")
+
+regression_predictions <- regression_predictions |> 
+  mutate(model = str_remove(model, "_predictions\\.parquet$"))
+classification_predictions <- classification_predictions |> 
+  mutate(model = str_remove(model, "_predictions\\.parquet$"))
+
+```
+
+### Comparación de modelos
+
+#### Regresión
+
+Tomando todos los modelos de regresión, obtenemos aquellos con mayor precisión, independientemente del target y los representamos en un mapa de calor en función del dataset usado.
+Parece ser que los modelos LSTM junto con los GRU son los que mejor se comportan de media.
+
+```{r}
+heatmap_regression <- regression_results |>
+  group_by(dataset, model) |>
+  summarise(Direction_Accuracy = max(Direction_Accuracy, na.rm = TRUE), .groups = "drop") |>
+  ggplot(aes(x = dataset, y = model, fill = Direction_Accuracy)) +
+  geom_tile() +
+  geom_text(aes(label = sprintf("%.2f", Direction_Accuracy)), size = 3.5) +
+  scale_fill_distiller(palette = "RdYlBu", direction = 1,
+                       limits = c(40, 65),
+                       name = "Direction Accuracy (%)") +
+  labs(title = "Regresión: Direction Accuracy por Dataset y Modelo",
+       x = "Dataset", y = "Modelo") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(size = 16, face = "bold"))
+
+save_plot("heatmap_regression", heatmap_regression)
+
+regression_results |>
+  dplyr::select(dataset, model, Direction_Accuracy, target) |> 
+  group_by(dataset, model) |>
+  summarise(Direction_Accuracy = max(Direction_Accuracy, na.rm = TRUE), .groups = "drop") |> 
+  mutate(Direction_Accuracy = round(Direction_Accuracy,2)) |> 
+  arrange(desc(Direction_Accuracy)) |> 
+  head(10)|> 
+  kable(booktabs = TRUE, caption = "Precisión máxima por modelo") |> 
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+
+```
+
+##### Top10 modelos por RMSE
+
+Cuando comparamos los modelos por RMSE, vemos que los modelos LSTM y GRU no aparecen en el top10, aparece RandomForest.
+
+```{r}
+#Top10 modelos por RMSE
+regression_results |> 
+  dplyr::select(dataset, target, model, RMSE, R2, Direction_Accuracy ) |> 
+  dplyr::arrange(RMSE) |> 
+  mutate(RMSE= round(RMSE,2),
+         R2 = round(R2,2),
+         Direction_Accuracy = round(Direction_Accuracy,2)) |> 
+  head(10) |> 
+  kable(booktabs = TRUE, caption = "Mejor modelo por RMSE") |> 
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+```
+
+##### Mejor modelo por dataset
+
+Al igual que cuando extraemos al mejor modelo por dataset usado, aparece también como el modelo con menor RMSE a RandomForest.
+
+```{r}
+# Top por dataset
+best_by_dataset <- regression_results |> 
+  dplyr::select(dataset, target, model, RMSE, R2, Direction_Accuracy) |> 
+  dplyr::mutate(across(where(is.character), as.factor)) |> 
+  dplyr::group_by(dataset) |> 
+  dplyr::slice_min(RMSE, n = 1) |>
+  dplyr::ungroup() |> 
+  mutate(RMSE= round(RMSE,2),
+         R2 = round(R2,2),
+         Direction_Accuracy = round(Direction_Accuracy,2)) |> 
+  kable(booktabs = TRUE, caption = "Precisión máxima por modelo") |> 
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+best_by_dataset
+
+```
+
+##### Mayor exactitud por modelo
+
+De los 9 modelos usados en regresión, extraemos en qué condiciones (dataset-target) obtienen mejor precisión.
+En caso de empate, escogemos el que tenga menos RMSE.
+Observamos claramente ahora, que el modelo GRU a pesar de tener una de las mayores precisiones, también tiene un RMSE extremadamente alto.
+
+```{r}
+best_by_model <-  regression_results |> 
+  dplyr::select(dataset, target, model, RMSE, R2, Direction_Accuracy) |> 
+  dplyr::group_by(model) |> 
+    dplyr::arrange(RMSE, .by_group = TRUE) |>  # desempata por menor RMSE
+  dplyr::slice_max(Direction_Accuracy, n = 1, with_ties = FALSE) |>
+  dplyr::ungroup()|> 
+  mutate(RMSE= round(RMSE,2),
+         R2 = round(R2,2),
+         Direction_Accuracy = round(Direction_Accuracy,2))
+
+best_by_model |>
+  kable(booktabs = TRUE, caption = "Mayor exactitud en cada modelo") |> 
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+acc_regression_plot <- best_by_model |> 
+ mutate(model = fct_reorder(model, Direction_Accuracy, .desc = TRUE)) |>
+ggplot() +
+  aes(x = model, y = Direction_Accuracy, fill = dataset) +
+  geom_bar(stat = "summary", fun = "sum") +
+  geom_hline(yintercept = 50, colour = "red", linetype="dashed")+
+  annotate("text", x = Inf, y = 50, label = "Azar 50%", 
+           hjust = 1, vjust = -0.5, colour = "black", size = 3.5) +
+  scale_fill_hue(direction = 1) +
+   theme_minimal()+
+  theme(axis.text = element_text(angle = 45, hjust = 1))
+ 
+save_plot("acc_regression_plot",acc_regression_plot)
+
+```
+
+##### Mejor modelo por target
+
+Obtenemos el mejor modelo por target, siendo los modelos basados en árboles los que mejor se comportan, RandomForest y el ensemble de modelos de árboles (RandomForest, XGBoost y LightGBM)
+
+```{r}
+regression_results |> 
+  dplyr::select(dataset, target, model, RMSE, R2, Direction_Accuracy) |> 
+  dplyr::group_by(target) |> 
+   dplyr::slice_min(RMSE, n = 1) |>
+  dplyr::ungroup() |> 
+  mutate(RMSE= round(RMSE,2),
+         R2 = round(R2,2),
+         Direction_Accuracy = round(Direction_Accuracy,2)) |> 
+  kable(booktabs = TRUE, caption = "Mejor modelo por target") |> 
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+
+#### Clasificación
+
+En el caso de clasificación, obtenemos varios modelos de diversas arquitecturas con precisiones por encima del 60%.
+Analicemoslas con más detalle.
+
+```{r}
+heatmap_classification <- classification_results |>
+  dplyr::select(dataset, model, Accuracy, target) |> 
+  group_by(dataset, model) |>
+  summarise(Accuracy = max(Accuracy, na.rm = TRUE), .groups = "drop") |> 
+  mutate(Accuracy = round(Accuracy,2)) |> 
+  arrange(desc(Accuracy)) |> 
+  head(10)|> 
+  kable(booktabs = TRUE, caption = "Precisión máxima por modelo") |> 
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+save_plot("heatmap_classification", heatmap_classification)
+
+classification_results |>
+  group_by(dataset, model) |>
+  summarise(Accuracy = max(Accuracy, na.rm = TRUE), .groups = "drop") |>
+  ggplot(aes(x = dataset, y = model, fill = Accuracy)) +
+  geom_tile() +
+  geom_text(aes(label = sprintf("%.2f", Accuracy)), size = 3.5) +
+  scale_fill_distiller(palette = "RdYlBu", direction = 1,
+                       limits = c(0.450, 0.65),
+                       name = "Accuracy (%)") +
+  labs(title = "Clasificación: Accuracy por Dataset y Modelo",
+       x = "Dataset", y = "Modelo") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(size = 16, face = "bold"))
+
+
+```
+
+##### Top10 modelos por F1-score
+
+```{r}
+#Top10 modelos por F1
+classification_results |> 
+  dplyr::select(dataset, target, model, F1, Accuracy, ROC_AUC) |> 
+  dplyr::arrange(desc(F1)) |>
+    mutate(RMSE= round(F1,2),
+         ROC_AUC = round(ROC_AUC,2),
+         Accuracy = round(Accuracy,2)) |> 
+  head(10) |> 
+  kable(booktabs = TRUE, caption = "Mejor modelo por F1-score") |> 
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+
+##### Mejor modelo por dataset
+
+```{r}
+# Top por dataset
+best_by_dataset <- classification_results |> 
+  dplyr::select(dataset, target, model, F1, Accuracy) |> 
+  dplyr::mutate(across(where(is.character), as.factor)) |> 
+  dplyr::group_by(dataset) |> 
+  dplyr::arrange(desc(Accuracy), .by_group = TRUE) |>  # desempata por menor RMSE
+  dplyr::slice_max(F1, , n = 1, with_ties = FALSE) |>
+  dplyr::ungroup()
+
+best_by_dataset
+```
+
+##### Mayor exactitud por modelo
+
+```{r}
+best_by_model <-  classification_results |> 
+  dplyr::select(dataset, target, model, F1, Accuracy) |> 
+  dplyr::group_by(model) |> 
+    dplyr::arrange(F1, .by_group = TRUE) |>  # desempata por menor RMSE
+  dplyr::slice_max(Accuracy, n = 1, with_ties = FALSE) |>
+  dplyr::ungroup()
+
+print(best_by_model)
+
+acc_regression_plot <- best_by_model |> 
+ mutate(model = fct_reorder(model, Accuracy, .desc = TRUE)) |>
+ggplot() +
+  aes(x = model, y = Accuracy, fill = dataset) +
+  geom_bar(stat = "summary", fun = "sum") +
+  geom_hline(yintercept = 0.50, colour = "red", linetype="dashed")+
+  annotate("text", x = Inf, y = 0.50, label = "Azar 50%", 
+           hjust = 1, vjust = -0.5, colour = "black", size = 3.5) +
+  scale_fill_hue(direction = 1) +
+   theme_minimal()+
+  theme(axis.text = element_text(angle = 45, hjust = 1))
+ 
+save_plot("acc_classification_plot",acc_regression_plot)
+```
+
+##### Mejor modelo por target
+
+```{r}
+# Top10 por target
+classification_results |> 
+  dplyr::select(dataset, target, model, F1, Accuracy) |> 
+  dplyr::group_by(target) |> 
+  dplyr::arrange(F1, .by_group = TRUE) |> 
+  dplyr::slice_max(Accuracy, n = 1, with_ties =FALSE) |>
+  dplyr::ungroup()
+```
+
+### Mejoran las predicciones al incorporar GDELT
+
+#### Regresión
+
+```{r}
+
+# Comparar financial vs sentiment (mismo scaling)
+comparison_reg <- regression_results %>%
+  dplyr::filter(!str_detect(dataset, "financial_long_")) |> 
+  mutate(
+    scale_type = str_extract(dataset, "scaled|unscaled"),
+    data_type = str_extract(dataset, "financial|sentiment")
+  ) %>%
+  filter(!is.na(scale_type), !is.na(data_type)) %>%
+  dplyr::select(scale_type, data_type, model, target, Direction_Accuracy) %>%
+  pivot_wider(names_from = data_type, values_from = Direction_Accuracy) %>%
+  filter(!is.na(financial), !is.na(sentiment)) %>%
+  mutate(
+    diff = sentiment - financial
+  )
+
+# Guardar como xlsx
+save_table("comparison_regression_GDELT", comparison_reg)
+
+
+comparison_reg |> dplyr::arrange(desc(diff)) |> top_n(10)
+```
+
+##### Comparación estadística entre pares modelo-target entre diferentes datasets
+
+El test de Diebold-Mariano [@dieboldComparingPredictiveAccuracy1995] evalúa si las diferencias en precisión predictiva entre dos modelos de pronóstico son estadísticamente significativas, analizando directamente la serie temporal de errores de predicción.
+El test es robusto a autocorrelación en los errores y no requiere que los modelos estén anidados ni que los errores sigan una distribución normal, lo que lo hace especialmente adecuado para series financieras donde estas condiciones raramente se cumplen.
+Permite además especificar diferentes funciones de pérdida (MSE, MAE), adaptándose a distintos criterios de evaluación según el contexto aplicado.
+Para la predicción de rendimientos del IBEX35, este test cuantifica si el valor añadido del análisis de sentimiento de noticias (GDELT) produce mejoras estadísticamente significativas en la precisión de los pronósticos, controlando por la estructura temporal inherente a los datos financieros y los distintos horizontes de predicción evaluados (1, 5, 10 y 20 días).
+
+El bootstrap es un método de remuestreo no paramétrico que permite estimar la distribución muestral de una estadística sin asumir una forma distribucional específica en los datos subyacentes.
+Mediante la generación de múltiples muestras con reemplazo del conjunto de evaluación, se obtiene una distribución empírica de las métricas de rendimiento que posibilita el cálculo de intervalos de confianza robustos.
+Esta aproximación es particularmente relevante en series financieras como el IBEX35, donde los supuestos de normalidad y homocedasticidad raramente se cumplen.
+Mientras que los tests de hipótesis (McNemar, Diebold-Mariano) determinan la significación estadística de las diferencias entre modelos, el bootstrap cuantifica la magnitud e incertidumbre de dichas diferencias, proporcionando una caracterización más completa del valor añadido del análisis de sentimiento.
+Esta combinación de inferencia frecuentista y estimación por remuestreo sigue las recomendaciones metodológicas actuales para evaluación rigurosa de modelos predictivos en finanzas.
+
+En nuestras comparaciones de dataset1 respecto a dataset2, si el valor de la diferencia es \>0, el modelo mejora con dataset2.
+Si el intervalo de confianza no cruza el 0, es una mejora significativa; y si además p-value \< 0.05, la mejora es significativa.
+
+```{r}
+
+source("code/R/23.compare_predictions.R")
+regression_stats <- compare_regressors(regression_predictions)
+
+#Guargar como xlsx
+save_table("regression_stats", regression_stats)
+
+regression_stats_summary <- summarize_comparison_results(regression_stats, test_type="regression")
+```
+
+```{r}
+regression_stats |> 
+  dplyr::filter(!str_detect(dataset1, "financial_long_")) |> 
+  dplyr::filter(!str_detect(dataset2, "financial_long_")) |> 
+  dplyr::filter(dm_pvalue<0.05, boot_pvalue<0.05) |> 
+  dplyr::select(comparison_type, model, target, scaling, dataset1, dataset2,boot_mean_diff, boot_ci_lower, boot_ci_upper) |> arrange(desc(boot_mean_diff)) |> head(10)
+```
+
+GDELT mejora un 7% los resultados de LightGBM, con dataset scaled y target returns_next_10, uno de los mejores models
+
+#### Clasificación
+
+```{r}
+
+# Comparar financial vs sentiment (mismo scaling)
+comparison_clf <- classification_results %>%
+  dplyr::filter(!str_detect(dataset,"financial_long_")) |> 
+  mutate(
+    scale_type = str_extract(dataset, "scaled|unscaled"),
+    data_type = str_extract(dataset, "financial|sentiment")
+  ) %>%
+  filter(!is.na(scale_type), !is.na(data_type)) %>%
+  dplyr::select(scale_type, data_type, model, target, Accuracy) %>%
+  pivot_wider(names_from = data_type, values_from = Accuracy) %>%
+  filter(!is.na(financial), !is.na(sentiment)) %>%
+  mutate(
+    diff = sentiment - financial
+  )
+
+
+# Guardar como xlsx
+save_table("comparison_classification_GDELT", comparison_clf)
+
+print(comparison_clf)
+```
+
+##### Comparación estadística entre pares modelo-target entre diferentes datasets
+
+El test de McNemar [@dietterichApproximateStatisticalTests1998] es el método estadístico estándar para comparar el rendimiento predictivo de dos clasificadores evaluados sobre el mismo conjunto de datos.
+A diferencia de comparar simplemente las tasas de acierto, este test analiza específicamente las discordancias entre modelos (casos donde uno acierta y el otro falla), evaluando si estas diferencias son estadísticamente significativas mediante una distribución chi-cuadrado.
+Su principal ventaja es que no asume independencia entre las predicciones, requisito que se viola cuando ambos modelos se evalúan sobre las mismas observaciones.
+Dietterich (1998) demostró que el test de McNemar presenta un error tipo I controlado y mayor potencia estadística que alternativas como el t-test pareado o la validación cruzada repetida para comparación de clasificadores.
+En el contexto de predicción de movimientos del IBEX35, este test permite determinar si la incorporación de variables de sentimiento derivadas de GDELT mejora significativamente la capacidad de clasificar correctamente la dirección del mercado (subida/bajada) respecto a modelos basados únicamente en indicadores técnicos y financieros.
+
+```{r}
+classification_stats <- compare_classifiers(classification_predictions)
+
+#Guardar como xlsx
+save_table("classification_stats", classification_stats)
+classification_stats_summary <- summarize_comparison_results(classification_stats, test_type="classification")
+```
+
+```{r}
+classification_stats |> 
+  dplyr::filter(!str_detect(dataset1, "financial_long_")) |> 
+  dplyr::filter(!str_detect(dataset2, "financial_long_")) |> 
+  dplyr::filter(mcnemar_pvalue <0.05, bootstrap_significant==TRUE) |> 
+  dplyr::select(comparison_type, model, target, scaling, diff, bootstrap_ci_lower, bootstrap_ci_upper) |> arrange(desc(diff)) |> head(10)
+
+```
+
+GDELT mejora la predicción de clasificación un 7% en el modelo LightGBM con datos sin escalar y target direcction_next.
+Por otro lado, empeora la predicción, aporta ruido, para GRU, direction_next sin escalar y GRU, direction_next_5 escalados.
+
+### Comparación entre horizontes
+
+#### Regresión
+
+```{r}
+source("code/R/23.compare_predictions.R")
+# Comparar horizontes
+regression_horizon_results <- compare_regression_across_horizons(regression_predictions)
+
+# Análisis
+analyze_regression_horizon_effects(regression_horizon_results)
+
+# Visualizaciones
+plot_regression_horizon_boxplot(regression_horizon_results)
+
+```
+
+#### Clasificación
+
+```{r}
+# Comparar horizontes
+classification_horizon_results <- compare_classification_across_horizons(classification_predictions)
+
+
+# Análisis
+analyze_classification_horizon_effects(classification_horizon_results)
+
+
+# Visualizaciones
+plot_classification_horizon_evolution(classification_horizon_results)
+
+
+
+```
+
+#### Horizonte óptimo
+
+#### 
+
+```{r}
+plot_executive_summary(classification_horizon_results, regression_horizon_results)
+
+# Horizonte óptimo
+optimal <- determine_optimal_horizons(classification_horizon_results, regression_horizon_results)
+```
+
+### Evaluación de predicciones
+
+¿Son reales las predicciones?
+¿Cómo se comparan estas predicciones con las de un modelo naïve, aquel que predice siempre la clase mayoritaria?
+El problema del modelo ingenuo lo observamos en el caso de los modelos clásicos, los cuales pronosticaban con una precisión del \~60%.
+Estos modelos siempre pronosticaban subida y acertaban el 60% de las veces porque el test está en un ciclo de subida donde el 60% de los días son de subida.
+
+La función `evaluate_all_models()` en el script `code/R/22.evaluate_naive_models.R` evalúa múltiples modelos de clasificación para determinar si sus predicciones son **estadísticamente significativas** o si se comportan como un **clasificador ingenuo** (naive classifier).
+
+Un clasificador ingenuo es aquel que predice siempre la clase mayoritaria o que no aporta información útil más allá del azar.
+En problemas de predicción financiera con clases desbalanceadas, un modelo puede aparentar buen accuracy simplemente prediciendo siempre "sube" si el mercado sube el 55% de los días.
+La función realiza los siguientes pasos:
+
+1.  **Cálculo de métricas de rendimiento**: Para cada modelo, calcula métricas clave como accuracy, balanced accuracy, F1-score, precision, recall y Cohen's Kappa.
+
+2.  **Comparación con modelo ingenuo**: Compara las métricas del modelo con las de un clasificador ingenuo que siempre predice la clase mayoritaria.
+
+3.  **Test estadístico**: Realiza un test binomial para comprobar si la accuracy del modelo es significativamente mejor que la del clasificador ingenuo.
+
+4.  **Criterios Naïve**: Define criterios para considerar un modelo como naïve: - Si el p-value del test binomial es mayor que 0.05, indicando que no hay evidencia suficiente para afirmar que el modelo supera al clasificador ingenuo.
+
+    -   Si la Cohen's Kappa es menor o igual a 0.1, indicando que el modelo no tiene mejor acuerdo que el azar.
+    -   Si el balanced accuracy es menor o igual a 0.52, indicando que el modelo no es mejor que el azar en clases desbalanceadas.
+    -   Si el F1-score es menor o igual a 0.1, indicando que el modelo no tiene un buen equilibrio entre precisión y recall. Un clasificador ingenuo (que predice siempre la clase mayoritaria) tendrá F1 ≈ 0 en la clase minoritaria porque no la predice nunca.
+
+    4.  **Veredicto**: Basándose en las métricas y el test estadístico, asigna un veredicto a cada modelo si cumple con dos o más criterios naïve: - "REAL": Si el modelo supera significativamente al clasificador ingenuo.
+
+    -   "NAIVE": Si el modelo no supera significativamente al clasificador ingenuo. El resultado es un data frame que resume el rendimiento y veredicto de cada modelo, permitiendo identificar cuáles modelos aportan valor real en la predicción frente a aquellos que simplemente replican el comportamiento del clasificador ingenuo.
+
+5.  **Filtrado**: Finalmente, filtra los modelos para quedarse solo con aquellos que son considerados "REALES", Cohen's Kappa \>0.1 y p-value del test binomial \<0.05, es decir, que superan significativamente al clasificador ingenuo.
+
+#### Clasificación
+
+##### Convertir a lista
+
+```{r clf_list_creation}
+#| echo: false
+# Crear lista anidada: dataset > target > model
+classification_list <- classification_predictions |>
+  group_by(dataset, target) |>
+  group_split() |>
+  map(function(df_group) {
+    dataset_name <- unique(df_group$dataset)
+    target_name <- unique(df_group$target)
+    
+    # Lista de modelos para este dataset-target
+    models_list <- map(1:nrow(df_group), function(i) {
+      model_name <- df_group$model[i]
+      
+      # Eliminar NAs
+      y_true <- df_group$y_test[[i]]
+      y_pred <- df_group$predictions[[i]]
+      
+      valid_idx <- !is.na(y_true) & !is.na(y_pred)
+      y_true_clean <- y_true[valid_idx]
+      y_pred_clean <- y_pred[valid_idx]
+      
+      list(
+        name = model_name,
+        dataset = dataset_name,
+        target = target_name,
+        y_true = y_true_clean,
+        y_pred = y_pred_clean
+      )
+    })
+    
+    return(models_list)
+  }) |>
+  flatten()
+
+```
+
+```{r}
+#| echo: false
+# Verificar estructura
+cat("Total modelos:", length(classification_list), "\n\n")
+for (i in 1:min(3, length(classification_list))) {
+  cat("Modelo", i, ":\n")
+  cat("  Dataset:", classification_list[[i]]$dataset, "\n")
+  cat("  Target:", classification_list[[i]]$target, "\n")
+  cat("  Model:", classification_list[[i]]$name, "\n")
+  cat("  N obs:", length(classification_list[[i]]$y_true), "\n\n")
+}
+```
+
+##### Evaluar modelos
+
+Aplicando los filtros descritos anteriormente, obtenemos que el único modelo que cumple con todas las caracteríscias es "LightGBM" para el problema de clasificación, dataset escalado y target "direction_next_5".
+La contraparte del modelo entrenado con datos de sentimientos o con la serie larga de datos financieros muestran un p-value \>0.05.
+A su vez, el modelo "LightGBM" que mostró un aumento en la precisión en el target "direccion_next" al incorporar datos de sentimientos, también mostró un p-value binomial \<0.05 y una Cohen's Kappa \<0.1.
+
+```{r clf_model_evaluation}
+#| eval: true
+#| echo: false
+
+# Evaluar todos los modelos
+classification_models_results <- evaluate_all_models(classification_list)
+write_rds(classification_models_results, "output/RData/classification_models_results.rds")
+
+# Ver resumen
+classification_models_results |>
+  group_by(Dataset, Target, Verdict) |>
+  summarise(n = n(), .groups = "drop")
+
+# Ver modelos REALES
+
+reales_classification <- classification_models_results |> 
+  filter(Verdict == "REAL", P_Value_Binomial < 0.05, Cohen_Kappa>0.1) |>
+  arrange(desc(Balanced_Accuracy))
+
+data.frame(t(reales_classification)) |> 
+    kable(booktabs = TRUE, caption = "Modelos reales de clasificación", 
+        col.names = c("Variable", "Valor"), 
+        align = "lc",  # Centra todas
+        longtable = FALSE) |>
+  kable_styling(latex_options = c("striped", "scale_down", "hold_position"),
+                full_width = FALSE) |> 
+   column_spec(2, width = "2cm") 
+```
+
+#### Regresión
+
+##### Convertir a clasificación y generar lista de modelos
+
+```{r reg_list_creation}
+# Crear lista anidada: dataset > target > model
+# Y convertir de regresión a clasificación en el mismo paso
+regression_list <- regression_predictions |>
+  group_by(dataset, target) |>
+  group_split() |>
+  map(function(df_group) {
+    dataset_name <- unique(df_group$dataset)
+    target_name <- unique(df_group$target)
+    
+    # Lista de modelos para este dataset-target
+    models_list <- map(1:nrow(df_group), function(i) {
+      model_name <- df_group$model[i]
+      # Obtener predicciones de regresión
+      y_true_reg <- df_group$y_test[[i]]
+      y_pred_reg <- df_group$predictions[[i]]
+      
+      # Convertir a clasificación
+      result <- regression_to_classification(y_true_reg, y_pred_reg)
+      
+      # Solo incluir si la conversión fue exitosa
+      if (!is.null(result)) {
+        list(
+          name = model_name,
+          dataset = dataset_name,
+          target = target_name,
+          y_true_reg = y_true_reg,
+          y_pred_reg = y_pred_reg,
+          y_true = result$y_true_class,
+          y_pred = result$y_pred_class
+        )
+      } else {
+        NULL
+      }
+    })
+    
+    # Eliminar NULLs
+    models_list <- models_list[!sapply(models_list, is.null)]
+    
+    return(models_list)
+  }) |>
+  flatten()
+
+# Verificar estructura
+cat("Total modelos:", length(regression_list), "\n\n")
+for (i in 1:min(3, length(regression_list))) {
+  cat("Modelo", i, ":\n")
+  cat("  Dataset:", regression_list[[i]]$dataset, "\n")
+  cat("  Target:", regression_list[[i]]$target, "\n")
+  cat("  Model:", regression_list[[i]]$name, "\n")
+  cat("  N obs:", length(regression_list[[i]]$y_true), "\n\n")
+}
+
+
+```
+
+##### Evaluar modelos
+
+Aplicando los filtros descritos anteriormente, obtenemos que los modelos que cumplen con todas las caracteríscias son 9, destacando "XGBoost" y "LightGBM" para el problema de regresión.
+Destacando XGBoost por su predicción a más largo plazo.
+A su vez, el modelo "LightGBM" que mostró un aumento en la precisión en el target "return_next_10" al incorporar datos de sentimientos escalados, también mostró un p-value binomial \<0.05 y una Cohen's Kappa \<0.1.
+
+```{r reg_model_evaluation}
+#| eval: true
+#| echo: false
+# Evaluar todos los modelos
+regression_models_results <- evaluate_all_models(regression_list)
+write_rds(regression_models_results, "output/RData/regression_models_results.rds")
+# Ver resumen
+regression_models_results |>
+  group_by(Dataset, Target, Verdict) |>
+  summarise(n = n(), .groups = "drop")
+
+# Ver modelos REALES
+reales_regression <- regression_models_results |> 
+  filter(Verdict == "REAL", P_Value_Binomial < 0.05, Cohen_Kappa>0.1) |>
+  arrange(desc(Balanced_Accuracy))
+reales_regression <- remove_rownames(reales_regression)
+print(reales_regression)
+
+data.frame(t(reales_regression)) |> 
+  mutate(across(everything(), ~gsub("_", " ", .))) |>  # Reemplaza _ por espacio
+  kable(booktabs = TRUE, 
+        caption = "Modelos reales de regresión", 
+        align = "lccccccccc",
+        longtable = FALSE,
+        escape = TRUE) |>  # escape, no scape
+  kable_styling(latex_options = c("striped", "scale_down", "hold_position"),
+                full_width = FALSE) |> 
+  column_spec(2:10, width = "2cm")
+
+
+```
+
+#### Unir resultados de evaluación
+
+```{r naive_model_evaluation}
+
+#| echo: false
+# Cargar resultados de modelos naïve
+naive_models_results <- readRDS(paste0(output_path,"/RData/naive_models_comparison.rds"))
+```
+
+```{r combine_evaluation_results}
+#| echo: false
+#| eval: true
+# Añadir columna de tipo de modelo
+naive_models_results <- naive_models_results |>
+  mutate(Model_Type = "Clásico")
+classification_models_results <- classification_models_results |>
+  mutate(Model_Type = "Clasificación")
+regression_models_results <- regression_models_results |>
+  mutate(Model_Type = "Regresión")
+
+# Unir todos los resultados
+all_evaluation_results <- bind_rows(
+  naive_models_results,
+  classification_models_results,
+  regression_models_results
+)
+
+# Ver resumen
+all_evaluation_results |>
+  group_by(Model_Type, Verdict) |>
+  summarise(n = n(), .groups = "drop") |> 
+  kable(booktabs = TRUE, 
+        caption = "Número de modelos por tipo", 
+        col.names = c("Tipo de modelo", "Veredicto", "N"), 
+        longtable = FALSE)|>
+  kable_styling(latex_options = c("hold_position", "scale_down"))
+# Filtrar modelos REALES
+
+real_models_results <- all_evaluation_results |>
+  filter(Verdict == "REAL", P_Value_Binomial < 0.05, Cohen_Kappa>0.1) |>
+  arrange(Model_Type, Dataset, Target, desc(Balanced_Accuracy))
+
+real_models_results <- remove_rownames(real_models_results)
+
+real_models_results |>
+  dplyr::select(Model_Type, Dataset, Target, Model, Balanced_Accuracy, Cohen_Kappa, P_Value_Binomial) |> 
+  mutate(Balanced_Accuracy = round(Balanced_Accuracy,2),
+         Cohen_Kappa = round(Cohen_Kappa,2)) |>
+  kable(booktabs = TRUE, 
+        caption = "Modelos REALES tras evaluación naïve", 
+        col.names =  c("Tipo","Dataset", "Target", "Modelo", "Balanced Accuracy", "Cohen's Kappa", "P-Value Binomial"), 
+        align = "lcccccc",  # Centra todas
+        longtable = FALSE)|>
+  kable_styling(latex_options = c("hold_position", "scale_down"))|>
+  column_spec(1:7, width = "2cm")  # Ajusta el ancho según necesites
+
+
+```
+
+## SessionInfo()
+
+```{r}
+sessionInfo()
+```

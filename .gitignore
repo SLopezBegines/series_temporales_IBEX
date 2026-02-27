@@ -1,0 +1,45 @@
+# Generated HTML annexes (too large for Git)
+Anexos/*.html
+Anexos/Anexo\ Fase*.html
+
+# Generated PDF annexes (reproduced from .qmd sources)
+Anexos/Anexo\ Fase*.pdf
+Anexos/Anexo\ 1*
+
+# Generated readme PDF
+readme.pdf
+
+# Log files
+EDA_RStudio/code/sh/*.log
+
+# Data (raw GDELT ~150 GB, processed datasets)
+data/
+rawdata/
+input_data/
+output/
+results/
+
+# Trained models
+*.joblib
+*.keras
+*.h5
+*.pkl
+
+# R environment
+renv/
+.Rprofile
+.RData
+.Rhistory
+*.Rproj
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+.env
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,435 @@
+---
+title: "Predicción de valores y tendencias de cierre del IBEX35 mediante *machine learning* y *webscraping*"
+subtitle: "Fase 6: Evaluación de modelos"
+author: "Santiago López Begines"
+date: "`r Sys.Date()`"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    theme: cosmo
+    embed-resources: true
+    fig-width: 8
+    fig-height: 6
+    df-print: paged
+  pdf:
+    df-print: kable
+    documentclass: article
+    latex_engine: xelatex
+    fontsize: 11pt
+    mainfont: Liberation Sans
+    linestretch: 1
+    geometry:
+      - top=2.5cm
+      - bottom=2.5cm
+      - left=3cm
+      - right=3cm
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    colorlinks: true
+    indent: true
+    fig-pos: 'H'
+    keep-tex: true
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+  freeze: auto
+editor: visual
+---
+
+## Fase 6: Validación final con datos nuevos
+
+Basándonos en los resultados de la evaluación de modelos, seleccionamos los mejores modelos para la validación final con datos nuevos.
+
+### Descarga de nuevos datos
+
+Para la validación final de los modelos seleccionados, se descargan datos nuevos del Ibex35 desde 2025-10-17 hasta 2025-11-30.
+
+```{python stocks_download}
+#| eval: false
+#| echo: false
+#| include: false
+
+import sys
+sys.path.append("../../code/py")
+from stocks_downloader import download_ibex
+from stocks_list import stocks_to_download, ibex_selected_companies
+#import importlib
+#importlib.reload(stocks_downloader)
+
+# Diccionario para guardar resultados
+results_indexes = {}
+
+# Bucle general
+for stock in stocks_to_download:
+    ticker = stock["ticker"]
+    name = stock["name"]
+    print(f"Descargando {name} ({ticker})...")
+
+    df = download_ibex(ticker, "2004-01-01", "2025-11-30", False)
+
+    # Guardar en el diccionario, clave = nombre del índice
+    results_indexes[name] = df
+
+
+```
+
+```{r process_validation_data}
+#| eval: false
+#| include: false
+#| echo: false
+stocks <- py_to_r(py$results_indexes)
+# Remove stocks with zero rows
+stocks <- stocks[sapply(stocks, function(x) nrow(x) > 0)]
+
+stocks <- Map(function(df, name) {
+  df$date <- as.Date(row.names(df))
+  df$index <- name
+  colnames(df) <- c("close", "high", "low", "open", "volume", "date", "index")
+  return(df)
+}, stocks, names(stocks))
+
+# All dfs bind rows
+validation_data <- bind_rows(stocks, .id = "index")
+validation_data <- validation_data |>
+  dplyr::mutate(
+    index = as.factor(index),
+    date = as.Date(date)
+  )
+# Guardar datos
+saveRDS(validation_data, file = paste0("../", output_path,"/RData/validation_data_2004_01_01_2025_11_30.rds"))
+```
+
+### Preparación de datos para validación
+
+Se preparan los datos nuevos para la validación final de los modelos seleccionados.
+Para ello se hace uso del script `code/R/24.scaling_validation_data.R`, el cual usa los parámetros de normalización (mean & sd) usados en el Z-score del conjunto de entrenamiento y los aplica a los nuevos datos OHLCV de todos los índices usados.
+
+```{r prepare_validation_data}
+#| eval: false
+#| include: true
+
+source("../code/R/24.scaling_validation_data.R")
+# Crear archivo de log
+log_file <- file.path(paste0("../","output/log", "fase_6_log_validation_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt"))
+
+log_cat("== Iniciando archivo Log Fase 6: Validación ==\n")
+log_cat(paste0("== Fecha: ", format(Sys.time(), "%Y%m%d_%H%M%S"), " ==\n\n"))
+# Cargar parámetros de normalización
+scaling_params <- readRDS(file = paste0("../", output_path,"/RData/ML_financial/scaler_zscore.rds"))
+#scaling_params <- readRDS(file = paste0("../", output_path,"/RData/ML_financial_long/scaler_zscore.rds"))
+
+
+start_date <- min(validation_data$date)
+end_date <- max(validation_data$date)
+# Datos Euribor
+# Configurar API key (solo primera vez)
+fredr_set_key("399e99f309c87a112f4e4bb45e502578")
+
+# Descargar Euribor a 3M
+euribor <- fredr(
+  series_id = c("IR3TIB01EZM156N"),
+  observation_start = as.Date(start_date),
+  observation_end = as.Date(end_date)
+)
+
+# Renombrar columnas
+euribor <- euribor %>%
+  dplyr::select(date, value) %>%
+  rename(euribor_3m = value)
+
+# Crear secuencia completa de fechas (días hábiles o todos los días)
+fechas_completas <- data.frame(
+  date = seq(min(euribor$date), max(euribor$date), by = "day")
+)
+
+# Unir y rellenar NA hacia adelante
+euribor_completo <- fechas_completas %>%
+  dplyr::left_join(euribor, by = "date") %>%
+  fill(euribor_3m, .direction = "down")
+euribor_long <- euribor_completo %>%
+  mutate(
+    index = "euribor_3m",
+    close = euribor_3m,
+    open = NA,
+    high = NA,
+    low = NA,
+    volume = NA
+  ) %>%
+  dplyr::select(date, index, open, high, low, close, volume)
+
+validation_data <- bind_rows(validation_data, euribor_long)
+
+validation_data <- validation_data |>
+  mutate(
+    index = as.factor(index),
+    date = as.Date(date)
+  )
+
+```
+
+```{r calculate_validation_features}
+#| eval: false
+#| include: true
+
+  # 1. Calcular features SIN escalado
+  validation_unscaled <- calculate_validation_features(
+    all_stocks_df = validation_data,
+    validation_start = "2025-10-17",
+    validation_end = "2025-11-30",
+    target_index = "ibex35",
+    scaler_path = NULL,
+    min_history_days = 252,
+    verbose = TRUE
+  )
+
+  # 2. Calcular features CON escalado
+  validation_scaled <- calculate_validation_features(
+    all_stocks_df = validation_data,
+    validation_start = "2025-10-17",
+    validation_end = "2025-11-30",
+    target_index = "ibex35",
+    scaler_path = paste0("../", output_path,"/RData/ML_financial/scaler_zscore.rds"), # ruta al archivo de scaler
+    min_history_days = 252,
+    verbose = TRUE
+  )
+  # Guardar datos preparados
+  saveRDS(validation_unscaled, file = "../output/RData/validation_unscaled.rds")
+  saveRDS(validation_scaled, file = "../output/RData/validation_scaled.rds")
+  #guardar en CSV
+  write_csv(validation_unscaled, file = "../output/tables/validation_unscaled.csv")
+  write_csv(validation_scaled, file = "../output/tables/validation_scaled.csv")
+```
+
+### Evaluar modelos
+
+#### LightGBM classification - financial_scaled - direction_next_5
+
+```{python evaluate_clf}
+#| eval: false
+import sys
+sys.path.append("../code/py")
+
+from validate_model import (
+    load_model, 
+    load_validation_data, 
+    verify_features, 
+    prepare_data, 
+    evaluate_model,
+    EXPECTED_FEATURES)
+
+model, is_clf = load_model("../data/py_models_checking/clf_fin_scaled_lightgbm_direction_next_5/LightGBM.joblib")
+df = load_validation_data("../output/tables/validation_scaled.csv")
+verify_features(df, EXPECTED_FEATURES)
+X, y, dates = prepare_data(df, target_col="direction_next_5")
+results = evaluate_model(model, X, y, dates)
+
+```
+
+```         
+Cargando modelo desde: ../data/py_models_checking/clf_fin_scaled_lightgbm_direction_next_5/LightGBM.joblib
+Modelo cargado: LGBMClassifier
+Tipo detectado: Clasificador
+Cargando datos desde: ../output/tables/validation_scaled.csv
+Datos cargados: 31 filas, 51 columnas
+
+=== VERIFICACIÓN DE FEATURES ===
+✓ Todas las features esperadas están presentes
+True
+
+=== PREPARACIÓN DE DATOS ===
+Target: direction_next_5
+Observaciones con target válido: 26 de 31
+
+=== EVALUACIÓN DEL MODELO (CLASIFICACIÓN) ===
+
+--- Métricas de Clasificación ---
+Accuracy:  0.4615 (46.15%)
+Precision: 0.5882
+Recall:    0.5882
+F1-Score:  0.5882
+AUC-ROC:   0.4444
+
+--- Comparación con Baseline ---
+Baseline (% clase 1): 0.6538 (65.38%)
+Mejora sobre random:  -3.85 pp
+Mejora sobre baseline: -19.23 pp
+
+--- Matriz de Confusión ---
+                 Predicho
+              Neg    Pos
+Real Neg        2      7
+Real Pos        7     10
+
+--- Distribución de Predicciones ---
+Predicciones positivas: 17 (65.4%)
+Predicciones negativas: 9 (34.6%)
+
+--- Análisis Temporal ---
+
+Accuracy por semana:
+      aciertos  total  accuracy
+week                           
+42           1      1       1.0
+43           4      5       0.8
+44           1      5       0.2
+45           4      5       0.8
+46           0      5       0.0
+47           2      5       0.4
+```
+
+#### Evaluar LightGBM regression - financial_unscaled - return_next_5
+
+```{python evaluate_reg}
+#| eval: false
+import sys
+sys.path.append("../code/py")
+
+from validate_model import (
+    load_model, 
+    load_validation_data, 
+    verify_features, 
+    prepare_data, 
+    evaluate_model,
+    EXPECTED_FEATURES)
+# Regresor LightGBM
+model, is_clf = load_model("../data/py_models_checking/reg_fin_unscaled_lightgbm_returns_next_5/LightGBM.joblib")
+df = load_validation_data("../output/tables/validation_unscaled.csv")
+verify_features(df, EXPECTED_FEATURES)
+X, y, dates = prepare_data(df, target_col="returns_next_5")
+results = evaluate_model(model, X, y, dates)
+```
+
+```         
+Cargando modelo desde: ../data/py_models_checking/reg_fin_unscaled_lightgbm_returns_next_5/LightGBM.joblib
+Modelo cargado: LGBMRegressor
+Tipo detectado: Regresor
+Cargando datos desde: ../output/tables/validation_unscaled.csv
+Datos cargados: 31 filas, 51 columnas
+
+=== VERIFICACIÓN DE FEATURES ===
+✓ Todas las features esperadas están presentes
+True
+
+=== PREPARACIÓN DE DATOS ===
+Target: returns_next_5
+Observaciones con target válido: 26 de 31
+
+=== EVALUACIÓN DEL MODELO (REGRESIÓN) ===
+
+--- Métricas de Regresión ---
+RMSE:  1.1517
+MAE:   0.8747
+R²:    -0.4831
+MSE:   1.3263
+
+--- Métricas Direccionales (signo del retorno) ---
+Accuracy direccional: 0.4231 (42.31%)
+Baseline (% positivos): 0.6538 (65.38%)
+Mejora sobre random:  -7.69 pp
+
+--- Matriz de Confusión (Dirección) ---
+                 Predicho
+              Neg    Pos
+Real Neg        3      6
+Real Pos        9      8
+
+--- Estadísticas de Predicciones ---
+Media real:      0.1386
+Media predicha:  0.0181
+Std real:        0.9644
+Std predicha:    0.4389
+Correlación:     -0.2709
+
+--- Análisis Temporal ---
+
+Métricas por semana:
+      aciertos_dir  total  accuracy_dir  error_medio  error_std
+week                                                           
+42               0      1           0.0       1.8866        NaN
+43               2      5           0.4       0.2004     0.5854
+44               2      5           0.4      -0.3263     0.7950
+45               3      5           0.6       0.2939     1.5144
+46               3      5           0.6      -0.8257     1.2538
+47               1      5           0.2       0.9071     0.8481
+```
+
+#### Evaluar XGBoost regression - financial_long_scaled - return_next_20
+
+```{python evaluate_reg_xgboost}
+#| eval: false
+import sys
+sys.path.append("../code/py")
+
+from validate_model import (
+    load_model, 
+    load_validation_data, 
+    verify_features, 
+    prepare_data, 
+    evaluate_model,
+    EXPECTED_FEATURES
+)
+
+model, is_clf = load_model("../data/py_models_checking/reg_fin_long_scaled_xgboost_returns_next_20/XGBoost.joblib")
+df = load_validation_data("../output/tables/validation_scaled.csv")
+verify_features(df, EXPECTED_FEATURES)
+X, y, dates = prepare_data(df, target_col="returns_next_20")
+results = evaluate_model(model, X, y, dates)
+```
+
+```         
+Cargando modelo desde: ../data/py_models_checking/reg_fin_long_scaled_xgboost_returns_next_20/XGBoost.joblib
+Modelo cargado: XGBRegressor
+Tipo detectado: Regresor
+Cargando datos desde: ../output/tables/validation_scaled.csv
+Datos cargados: 31 filas, 51 columnas
+
+=== VERIFICACIÓN DE FEATURES ===
+✓ Todas las features esperadas están presentes
+True
+
+=== PREPARACIÓN DE DATOS ===
+Target: returns_next_20
+Observaciones con target válido: 11 de 31
+
+=== EVALUACIÓN DEL MODELO (REGRESIÓN) ===
+
+--- Métricas de Regresión ---
+RMSE:  1.3145
+MAE:   1.1246
+R²:    -0.4477
+MSE:   1.7280
+
+--- Métricas Direccionales (signo del retorno) ---
+Accuracy direccional: 0.3636 (36.36%)
+Baseline (% positivos): 0.6364 (63.64%)
+Mejora sobre random:  -13.64 pp
+
+--- Matriz de Confusión (Dirección) ---
+                 Predicho
+              Neg    Pos
+Real Neg        2      2
+Real Pos        5      2
+
+--- Estadísticas de Predicciones ---
+Media real:      -0.1136
+Media predicha:  0.0023
+Std real:        1.1459
+Std predicha:    0.4707
+Correlación:     -0.2911
+
+--- Análisis Temporal ---
+
+Métricas por semana:
+      aciertos_dir  total  accuracy_dir  error_medio  error_std
+week                                                           
+42               1      1           1.0      -1.3966        NaN
+43               2      5           0.4      -0.9104     1.2530
+44               1      5           0.2       0.9348     0.7525
+```

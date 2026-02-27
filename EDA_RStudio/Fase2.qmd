@@ -1,0 +1,2238 @@
+---
+title: "Predicción de valores y tendencias de cierre del IBEX35 mediante *machine learning* y *webscraping*"
+subtitle: "Fase 2: Análisis Exploratorio de datos financieros y de sentimientos"
+author: "Santiago López Begines"
+date: "`r Sys.Date()`"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    theme: cosmo
+    embed-resources: true
+    fig-width: 8
+    fig-height: 6
+    df-print: paged
+  pdf:
+    documentclass: article
+    latex_engine: xelatex
+    fontsize: 11pt
+    mainfont: Liberation Sans
+    linestretch: 1
+    geometry:
+      - top=2.5cm
+      - bottom=2.5cm
+      - left=3cm
+      - right=3cm
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    colorlinks: true
+    indent: true
+    fig-pos: 'H'
+    keep-tex: true
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+  freeze: auto
+editor: visual
+---
+
+### Configuración del entorno
+
+```{r cargar_librerias}
+#| include: false
+# Cargar librerías necesarias
+rm(list = ls())
+gc()
+#chmod +x bootstrap_system_deps.sh
+#./bootstrap_system_deps.sh
+source("code/R/00.libraries.R")
+```
+
+```{r directorios y variables globales}
+#| include: false
+#Global variables
+output_path <- "output/"
+image_number <- 1
+table_number <- 14
+set.seed(123) # For reproducibility
+# Create output directory if it doesn't exist
+dir.create("code", recursive = TRUE,showWarnings = FALSE)
+dir.create("data", recursive = TRUE,showWarnings = FALSE)
+# Source general functions
+source("code/R/01.general_functions.R")
+create_directories(output_path)
+```
+
+### Load Functions
+
+```{r load_fucntions}
+source("code/R/02.EDA_functions.R")
+```
+
+# ANÁLISIS EXPLORATORIO DE DATOS (EDA)
+
+```{r}
+all_stocks_df <- read_parquet(paste0(output_path,"tables/all_indices.parquet"))
+all_companies_df <- read_parquet(paste0(output_path,"tables/ibex35_companies_all.parquet"))
+```
+
+## Validación de datos
+
+Revisión de rangos y fechas de indices bursátiles
+
+El rango de la serie temporal seleccionada para los índices bursátiles y las empresas del IBEX35 abarca desde enero de 2004 hasta octubre de 2025.
+A continuación, se presenta un resumen del rango temporal y la cantidad de observaciones disponibles para cada índice y empresa.
+Este rango se ha seleccionado en lugar del inicialmente propuesto (inicio del IBEX35 en 1992) debido a la disponibilidad y calidad de los datos históricos en las fuentes utilizadas (Yahoo Finance).
+Además, se ha considerado que el período desde 2004 proporciona una cobertura adecuada para el análisis, incluyendo eventos económicos significativos como la crisis financiera de 2008 y la pandemia de COVID-19.
+
+```{r rango_temporal}
+# Rango temporal stocks
+temporal_range_indices <- all_stocks_df |> 
+  group_by(index) |> 
+  summarise(fecha_inicio = min(date, na.rm = TRUE),
+            fecha_fin = max(date, na.rm = TRUE),
+            n_observaciones = n(),
+            dias_calendario = as.numeric(difftime(fecha_fin, fecha_inicio, units = "days")),
+            años_datos = round(dias_calendario / 365.25, 2)) |> 
+  arrange(fecha_inicio)
+reactViewTable(temporal_range_indices)
+
+save_table("temporal_range_indices",temporal_range_indices)
+
+# Rango temporal empresas IBEX35
+temporal_range_companies <- all_companies_df |> 
+  group_by(index, sector) |> 
+  summarise(fecha_inicio = min(date, na.rm = TRUE),
+            fecha_fin = max(date, na.rm = TRUE),
+            n_observaciones = n(),
+            dias_calendario = as.numeric(difftime(fecha_fin, fecha_inicio, units = "days")),
+            años_datos = round(dias_calendario / 365.25, 2),
+            .groups = "drop") |> 
+  arrange(años_datos)
+reactViewTable(temporal_range_companies)
+
+save_table("temporal_range_companies", temporal_range_companies)
+# Resumen por sector
+temporal_sector <- all_companies_df |> 
+  group_by(sector) |> 
+  summarise(
+    fecha_inicio = min(date, na.rm = TRUE),
+    fecha_fin = max(date, na.rm = TRUE),
+    n_observaciones = n(),
+    dias_calendario = as.numeric(difftime(fecha_fin, fecha_inicio, units = "days")),
+    años_datos = round(dias_calendario / 365.25, 2)) |> 
+  arrange(fecha_inicio)
+reactViewTable(temporal_sector)
+save_table("temporal_sector",temporal_sector)
+```
+
+### Gestión de valores faltantes por días no bursátiles
+
+Se observa un gap en los valores de la cotización del cambio Euro/Dólar en agosto de 2008 de 8 y 18 días.
+De la misma forma, se observa otro gap en la cotización del índice NIKKEI en Mayo de 2019.
+Se explorará más adelante el origen de estos gaps.
+
+```{r gaps}
+source("code/R/02.EDA_functions.R")
+
+# Detectar gaps en índices
+#Gaps en stocks
+gaps_indices <- detect_trading_gaps(all_stocks_df, date_col = "date", index_col = "index")
+reactViewTable(gaps_indices)
+save_table("gaps_indices", gaps_indices)
+# Gaps en empresas IBEX35
+gaps_companies <- detect_trading_gaps(all_companies_df, date_col = "date", index_col = "index")
+reactViewTable(gaps_companies)
+save_table("gaps_companies",gaps_companies)
+```
+
+Detección de valores faltantes (NA) en los datos descargados.
+
+```{r na_analysis}
+# Análisis de valores faltantes (NA)
+# Para índices
+na_analysis_indices <- all_stocks_df |>
+  group_by(index) |>
+  summarise(
+    n_total = n(),
+    na_close = sum(is.na(close)),
+    na_high = sum(is.na(high)),
+    na_low = sum(is.na(low)),
+    na_open = sum(is.na(open)),
+    na_volume = sum(is.na(volume)),
+    pct_na_close = round(100 * na_close / n_total, 2)
+  ) |>
+  filter(na_close > 0 | na_high > 0 | na_low > 0 | na_open > 0)
+
+print("=== VALORES FALTANTES EN ÍNDICES ===")
+if(nrow(na_analysis_indices) > 0) {
+  print(na_analysis_indices)
+} else {
+  print("No se detectaron valores faltantes (NA)")
+}
+
+# Para empresas
+na_analysis_companies <- all_companies_df |>
+  group_by(index) |>
+  summarise(
+    n_total = n(),
+    na_close = sum(is.na(close)),
+    na_volume = sum(is.na(volume)),
+    pct_na_close = round(100 * na_close / n_total, 2),
+    .groups = "drop"
+  ) |>
+  filter(na_close > 0) |>
+  arrange(desc(pct_na_close))
+
+print("=== VALORES FALTANTES EN EMPRESAS (top 10) ===")
+if(nrow(na_analysis_companies) > 0) {
+  print(head(na_analysis_companies, 10))
+} else {
+  print("No se detectaron valores faltantes (NA)")
+}
+```
+
+### Detección de días de trading esperados.
+
+```{r dias_trading_esperados}
+# Calcular días de trading esperados vs observados
+#Stocks
+trading_completeness <- all_stocks_df  |> 
+  group_by(index) |>
+  summarise(
+    fecha_inicio = min(date),
+    fecha_fin = max(date),
+    n_observado = n(),
+    n_esperado = round((as.numeric(difftime(fecha_fin, fecha_inicio, units = "days") / 365.25)) * 252, 2), 
+    completitud_pct = round(100 * n_observado / n_esperado, 2),
+    diferencia = n_esperado - n_observado
+  ) |>
+  arrange(completitud_pct)
+
+reactViewTable(trading_completeness)
+save_table("trading_completeness",trading_completeness)
+
+# Empresas IBEX35
+trading_completeness_companies <- all_companies_df |>
+  group_by(index) |>
+  summarise(
+    fecha_inicio = min(date),
+    fecha_fin = max(date),
+    n_observado = n(),
+    n_esperado = round((as.numeric(difftime(fecha_fin, fecha_inicio, units = "days") / 365.25)) * 252, 2), 
+    completitud_pct = round(100 * n_observado / n_esperado, 2),
+    diferencia = n_esperado - n_observado
+  ) |>
+  arrange(completitud_pct)
+
+  reactViewTable(trading_completeness_companies)
+  save_table("trading_completeness_companies",trading_completeness_companies)
+```
+
+### Detección de valores anómalos
+
+Se detectan valores anómalos en los datos descargados, tales como precios negativos o inconsistencias lógicas entre los valores de apertura, cierre, máximo y mínimo.
+Concrétamente en los datos de cotización del petróleo (Oil) durante los días 20 y 21 de Abril de 2020.
+Esto se debió a momentos clave durante el confinamiento provocado por el COVID-19 a nivel mundial.
+Dicho confinamiento y parada casi total de la economía mundial provocó éstas oscilaciones del precio del petróleo.
+
+```{r valores_anomalos}
+#Detección de Outliers
+# Detectar precios negativos o cero (errores de datos)
+# Stocks
+anomalies_price <- all_stocks_df |>
+  dplyr::filter(close <= 0 | high <= 0 | low <= 0 | open <= 0) |>
+  dplyr::select(index, date, open, high, low, close, volume)
+
+  reactViewTable(anomalies_price)
+ 
+save_table("anomalies_price",anomalies_price)   
+  
+# Empresas IBEX35
+anomalies_price_companies <- all_companies_df |>
+  dplyr::filter(close <= 0 | high <= 0 | low <= 0 | open <= 0) |>
+  dplyr::select(index, date, open, high, low, close, volume)
+
+  reactViewTable(anomalies_price_companies)
+save_table("anomalies_price_companies", anomalies_price_companies)
+```
+
+```{r inconsistencia_logica}
+# Detectar inconsistencias lógicas (high < low, close fuera de rango)
+# Stocks
+anomalies_logic <- all_stocks_df |>
+  dplyr::filter(high < low | close > high | close < low | open > high | open < low) |>
+  dplyr::select(index, date, open, high, low, close)
+
+reactViewTable(anomalies_logic)
+save_table("anomalies_logic", anomalies_logic)
+# Empresas IBEX35
+anomalies_logic_companies <- all_companies_df |>
+  dplyr::filter(high < low | close > high | close < low | open > high | open < low) |>
+  dplyr::select(index, date, open, high, low, close)
+
+reactViewTable(anomalies_logic_companies)
+save_table("anomalies_logic_companies", anomalies_logic_companies)
+```
+
+### Resumen ejecutivo de la validación de datos
+
+```{r resumen_validacion}}
+# Resumen Validación
+
+cat(sprintf("Período de datos: %s a %s\n", 
+            min(all_stocks_df$date), 
+            max(all_stocks_df$date)))
+cat(sprintf("Número de índices: %d\n", n_distinct(all_stocks_df$index)))
+cat(sprintf("Número de empresas: %d\n", n_distinct(all_companies_df$name)))
+cat(sprintf("Total observaciones índices: %s\n", format(nrow(all_stocks_df), big.mark = ",")))
+cat(sprintf("Total observaciones empresas: %s\n", format(nrow(all_companies_df), big.mark = ",")))
+cat("\n")
+cat("HALLAZGOS PRINCIPALES:\n")
+cat(sprintf("- Completitud promedio índices: %.2f%%\n", mean(trading_completeness$completitud_pct)))
+cat(sprintf("- Completitud promedio empresas: %.2f%%\n", mean(trading_completeness_companies$completitud_pct)))
+cat(sprintf("- Gaps detectados en índices: %d\n", nrow(gaps_indices)))  
+cat(sprintf("- Gaps detectados en empresas: %d\n", nrow(gaps_companies)))
+cat(sprintf("- Valores faltantes (NA) en índices: %d\n", nrow(na_analysis_indices)))
+cat(sprintf("- Valores faltantes (NA) en empresas: %d\n", nrow(na_analysis_companies)))
+cat(sprintf("- Valores anómalos (precio <= 0): %d\n", nrow(anomalies_price)))
+cat(sprintf("- Valores anómalos en empresas (precio <= 0): %d\n", nrow(anomalies_price_companies)))
+cat(sprintf("- Inconsistencias lógicas: %d\n", nrow(anomalies_logic)))
+cat(sprintf("- Inconsistencias lógicas en empresas: %d\n", nrow(anomalies_logic_companies)))
+cat("\n")
+
+# Save validation results in a list
+
+validation_results_stocks <- list(
+  temporal_range = temporal_range_indices,
+  gaps = gaps_indices,
+  na_analysis = na_analysis_indices,
+  trading_completeness = trading_completeness,
+  anomalies_price = anomalies_price,
+  anomalies_logic = anomalies_logic
+  )
+
+validation_results_companies <- list(
+  temporal_range = temporal_range_companies,
+  temporal_sector = temporal_sector,
+  gaps = gaps_companies,
+  na_analysis = na_analysis_companies,
+  trading_completeness = trading_completeness_companies,
+  anomalies_price = anomalies_price_companies,
+  anomalies_logic = anomalies_logic_companies
+)
+
+save_table("validation_results_stocks", validation_results_stocks)
+save_table("validation_results_companies", validation_results_companies)
+
+# Save validation results
+saveRDS(validation_results_stocks, paste0(output_path, "/RData/validation_results_stocks.rds"))
+saveRDS(validation_results_companies, paste0(output_path, "/RData/validation_results_companies.rds"))
+# Limpiar variables temporales
+rm(
+  temporal_range_indices, temporal_range_companies, temporal_sector,
+  gaps_indices, gaps_companies,
+  na_analysis_indices, na_analysis_companies,
+  trading_completeness, trading_completeness_companies,
+  anomalies_price, anomalies_price_companies,
+  anomalies_logic, anomalies_logic_companies
+)
+```
+
+### Visualización Resumen
+
+```{r}
+# Visualización Resumen Validación
+source("code/R/02.EDA_functions.R")
+plots_stocks <- generate_validation_plots(validation_results_stocks, all_stocks_df)
+plots_companies <- generate_validation_plots(validation_results_companies, all_stocks_df)
+
+
+```
+
+Se utilizó Yahoo Finance (vía librería yfinance) como fuente única de datos financieros.
+Esta librería proporciona precios ajustados por splits y dividendos por defecto.
+Los valores negativos detectados en el petróleo (CL=F) corresponden al evento histórico del 20 de abril de 2020, donde los contratos futuros WTI cotizaron en territorio negativo debido al colapso de demanda por COVID-19 y saturación de almacenamiento.
+No se realizó verificación cruzada con otras fuentes, aceptando las limitaciones inherentes a una fuente única.
+
+## Análisis Univariante
+
+Seleccionar el índice IBEX35 para el análisis exploratorio detallado.
+
+```{r select_ibex}
+# Seleccionar IBEX35 para EDA
+ibex <- all_stocks_df |> 
+  dplyr::filter(index == "ibex35")
+
+```
+
+### Precio de cierre: Tendencia, nivel, rango
+
+```{r close_price_analysis}
+summary_price <- data.frame(
+  Mínimo = min(ibex$close, na.rm = TRUE),
+  Q1 = quantile(ibex$close, 0.25, na.rm = TRUE),
+  Mediana = median(ibex$close, na.rm = TRUE),
+  Media = mean(ibex$close, na.rm = TRUE),
+  Q3 = quantile(ibex$close, 0.75, na.rm = TRUE),
+  Máximo = max(ibex$close, na.rm = TRUE),
+  Rango = max(ibex$close, na.rm = TRUE) - min(ibex$close, na.rm = TRUE)
+)
+reactViewTable(summary_price)
+
+# Nivel promedio por año
+ibex %>%
+  mutate(year = year(date)) %>%
+  group_by(year) %>%
+  summarise(
+    close_mean = mean(close, na.rm = TRUE),
+    close_min = min(close, na.rm = TRUE),
+    close_max = max(close, na.rm = TRUE)
+  ) %>%
+  reactViewTable()
+
+# Visualización
+p1 <- ggplot(ibex, aes(x = date, y = close)) +
+  geom_line(color = "#2C3E50", size = 0.5) +
+  geom_hline(yintercept = mean(ibex$close), 
+             color = "#E74C3C", linetype = "dashed", size = 1) +
+  labs(title = "IBEX35 - Precio de Cierre (2004-2025)",
+       subtitle = "Valor real | Línea roja: Media histórica",
+       x = "Fecha", y = "Precio de Cierre") +
+  scale_y_continuous(labels = comma) +
+  theme_minimal()
+
+p2 <- ggplot(ibex, aes(x = date, y = close)) +
+  geom_smooth(method = "gam", formula = y ~ s(x, k = 100),
+              color = "#1ABC9C", fill = "#1ABC9C", alpha = 0.15, size = 1)+ 
+  geom_hline(yintercept = mean(ibex$close), 
+             color = "#E74C3C", linetype = "dashed", size = 1) +
+  labs(title = "IBEX35 - Precio de Cierre (2004-2025)",
+       subtitle = "Línea verde: Suavizado GAM | Línea roja: Media histórica | ",
+       x = "Fecha", y = "Precio de Cierre") +
+  scale_y_continuous(labels = comma) +
+  theme_minimal()
+p <- p1+p2
+print(p)
+save_plot("precio_cierre", p1)
+
+```
+
+### Suavizado
+
+```{r suavizado}
+
+# Ajuste GAM con suavizado flexible
+gam_model <- mgcv::gam(close ~ s(as.numeric(date), k = 100), data = ibex)
+
+# Añadir predicciones suavizadas al dataframe
+ibex <- ibex %>%
+  mutate(close_smooth = predict(gam_model),
+         close_smooth_SMA = TTR::SMA(close, n=5))
+
+```
+
+```{r visualizacion_suavizado}
+# Visualización del suavizado
+
+p_smooth <- ggplot(ibex, aes(x = date)) +
+  geom_line(aes(y = close), color = "#2C3E50", size = 0.5, alpha = 0.6) +
+  geom_line(aes(y = close_smooth), color = "#E67E22", size = 1) +
+  geom_line(aes(y = close_smooth_SMA), color = "#2980B9", size = 1, linetype = "dashed") +
+  labs(title = "IBEX35 - Precio de Cierre con Suavizado (GAM y SMA)",
+       subtitle = "Línea naranja: Suavizado GAM | Línea azul: SMA (5 días)",
+       x = "Fecha", y = "Precio de Cierre") +
+  scale_y_continuous(labels = comma) +
+  theme_minimal() + 
+  theme(legend.position = "bottom")
+print(p_smooth)
+save_plot("suavizdo GMA y SMA", p_smooth)
+
+p_smooth <- ggplot(ibex |> dplyr::filter(date > "2020-01-01"), aes(x = date)) +
+  geom_line(aes(y = close), color = "#2C3E50", size = 0.5, alpha = 0.6) +
+  geom_line(aes(y = close_smooth), color = "#E67E22", size = 1) +
+  geom_line(aes(y = close_smooth_SMA), color = "#2980B9", size = 1, linetype = "dashed") +
+  labs(title = "IBEX35 - Precio de Cierre con Suavizado (GAM y SMA)",
+       subtitle = "Línea naranja: Suavizado GAM | Línea azul: SMA (5 días)",
+       x = "Fecha", y = "Precio de Cierre") +
+  scale_y_continuous(labels = comma) +
+  theme_minimal() + 
+  theme(legend.position = "bottom")
+print(p_smooth)
+save_plot("suavizdo GMA y SMA. Desde 2020", p_smooth)
+```
+
+Usaremos el suavizado por SMA, es menos complejo y no captura eventos futuros.
+El suavizado GAM es útil para visualización pero no para cálculos posteriores.
+
+### Variables a usar en el análisis preliminar
+
+Calculo de los retornos simples y logarítmicos, primera diferencia (Velocidad) y segunda diferencia (Aceleración)
+
+'''Primera derivada = d(precio)/dt ≈ Δprecio/Δt'''
+
+**Por qué es importante:** Precio → Retornos → Velocidad → Aceleración (0ª) (1ª) (1ª) (2ª)
+
+| Derivada | Variable | Significado Financiero |
+|----|----|----|
+| **0ª de precio** | `log_return_pct` | Retorno logarítmico porcentual |
+| **0ª de precio** | `simple_return` | Retorno simple |
+| **1ª de retornos** | `returns_velocity` | Aceleración/desaceleración momentum |
+| **1ª de volatilidad** | `volatility_velocity` | Cambio en riesgo |
+| **1ª de volumen** | `volume_velocity` | Cambio en actividad |
+| **2ª de retornos** | `returns_acceleration` | Anticipar inflexiones |
+
+Explicación Matemática y Funcional:
+
+**0ª Derivada de Precio**
+
+**`log_return_pct`**: Retorno logarítmico porcentual - **Fórmula**: $r_t = \ln(P_t / P_{t-1}) \times 100 = [\ln(P_t) - \ln(P_{t-1})] \times 100$ - **Función**: `diff(log(close))` calcula la diferencia entre logaritmos consecutivos - **Significado**: Mide el cambio porcentual continuo del precio.
+Ventajas: aditivos en el tiempo, simétricos (subida/bajada), asume capitalización continua.
+
+**`simple_return`**: Retorno aritmético porcentual - **Fórmula**: $R_t = \frac{P_t - P_{t-1}}{P_{t-1}} \times 100$ - **Función**: `diff(close) / head(close, -1)` divide la diferencia de precios por el precio anterior - **Significado**: Cambio porcentual discreto del precio.
+Más intuitivo pero no aditivo en el tiempo.
+
+**0ª Derivada de Volatilidad**
+
+**`volatility_20`**: Volatilidad móvil de 20 períodos - **Fórmula**: $\sigma_t = \sqrt{\frac{1}{n-1}\sum_{i=0}^{19}(r_{t-i} - \bar{r})^2}$ - **Función**: `rollapply()` aplica la desviación estándar (`sd`) en ventanas deslizantes de 20 observaciones, alineadas a la derecha - **Significado**: Cuantifica la dispersión/riesgo de los retornos.
+Mayor volatilidad = mayor incertidumbre.
+
+**1ª Derivada de Retornos**
+
+**`returns_velocity`**: Aceleración del momentum - **Fórmula**: $v_t = r_t - r_{t-1} = \Delta r_t$ - **Función**: `diff(log_return_pct)` calcula la diferencia entre retornos consecutivos - **Significado**: Mide si el momentum se acelera (v\>0) o desacelera (v\<0).
+Detecta cambios en la tendencia de los retornos.
+
+**1ª Derivada de Volatilidad**
+
+**`volatility_velocity`**: Tasa de cambio del riesgo - **Fórmula**: $\Delta\sigma_t = \sigma_t - \sigma_{t-1}$ - **Función**: `diff(volatility_20)` calcula la diferencia entre volatilidades consecutivas - **Significado**: Indica si el mercado se vuelve más volátil (Δσ\>0) o más estable (Δσ\<0).
+Útil para régimenes de riesgo cambiantes.
+
+**1ª Derivada de Volumen**
+
+**`volume_velocity`**: Cambio porcentual en actividad - **Fórmula**: $\Delta V_t = \frac{V_t - V_{t-1}}{V_{t-1}} \times 100$ - **Función**: `diff(volume) / head(volume, -1)` divide la diferencia de volúmenes por el volumen anterior - **Significado**: Expansión (\>0) o contracción (\<0) de la actividad de trading.
+Señala entrada/salida de liquidez.
+
+**2ª Derivada de Retornos**
+
+**`returns_acceleration`**: Curvatura del momentum - **Fórmula**: $a_t = v_t - v_{t-1} = (r_t - r_{t-1}) - (r_{t-1} - r_{t-2}) = r_t - 2r_{t-1} + r_{t-2}$ - **Función**: `diff(log_return_pct, differences = 2)` aplica `diff()` dos veces consecutivas - **Significado**: Detecta puntos de inflexión.
+Si a\>0 con v\<0: posible suelo.
+Si a\<0 con v\>0: posible techo.
+Anticipa cambios de régimen.
+
+INTERPRETACIÓN FINANCIERA:
+
+PRIMERA DERIVADA (Velocidad): • returns_velocity \> 0: Retornos AUMENTANDO (momentum positivo) • returns_velocity \< 0: Retornos DISMINUYENDO (perdiendo momentum) • Útil para: Detectar cambios de tendencia antes que precio
+
+SEGUNDA DERIVADA (Aceleración): • returns_acceleration \> 0: Momentum ACELERANDO • returns_acceleration \< 0: Momentum DESACELERANDO • Útil para: Anticipar puntos de inflexión
+
+### Retornos: Distribución, asimetría, Kurtosis
+
+```{r log_returns_analysis}
+# Calcular retornos logarítmicos
+ibex <- ibex %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(
+    # 0ª derivada de precio: Retornos
+    log_return_pct = c(NA, diff(log(close))) * 100,
+    simple_return = c(NA, diff(close) / head(close, -1)) * 100,
+     # Momentum de precio (cambio en cambio)
+    diff_close = c(NA, diff(close)),
+    price_momentum = c(NA, diff(diff_close)),
+    # 0ª derivada de volatilidad: Riesgo
+    volatility_20 = zoo::rollapply(log_return_pct, width = 20, FUN = sd, 
+                                   fill = NA, align = "right"),
+    
+    # 1ª derivada de retornos: Momentum
+    returns_velocity = c(NA, diff(log_return_pct)),
+    
+    # 1ª derivada de volatilidad: Cambio en riesgo
+    volatility_velocity = c(NA, diff(volatility_20)),
+    
+    # 1ª derivada de volumen: Cambio en actividad
+    volume_velocity = c(NA, diff(volume) / head(volume, -1)) * 100,
+    
+    # 2ª derivada de retornos: Inflexiones
+    returns_acceleration = c(NA, diff(returns_velocity)),
+    
+    # Segunda derivada de volatilidad
+    volatility_acceleration = c(NA, diff(volatility_velocity)),
+    
+    # Añadir calendario
+    weekday = weekdays(date),
+    month = lubridate::month(date, label = TRUE, abbr = TRUE),
+    quarter = quarter(date),
+    weekday = factor(weekday,
+                     levels = c("lunes", "martes", "miércoles", "jueves", "viernes")),
+    quarter = factor(quarter))
+# Derivadas de suavizado
+ibex <- ibex %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(
+    # 0ª derivada de precio: Retornos
+    log_return_pct_smooth = c(NA, diff(log(close_smooth_SMA))) * 100,
+    simple_return_smooth = c(NA, diff(close_smooth_SMA) / head(close_smooth_SMA, -1)) * 100,
+     # Momentum de precio (cambio en cambio)
+    diff_close_smooth = c(NA, diff(close_smooth_SMA)),
+    price_momentum_smooth = c(NA, diff(diff_close_smooth)),
+    # 0ª derivada de volatilidad: Riesgo
+    volatility_20_smooth = zoo::rollapply(log_return_pct_smooth, width = 20, FUN = sd, 
+                                   fill = NA, align = "right"),
+    
+    # 1ª derivada de retornos: Momentum
+    returns_velocity_smooth = c(NA, diff(log_return_pct_smooth)),
+    
+    # 1ª derivada de volatilidad: Cambio en riesgo
+    volatility_velocity_smooth = c(NA, diff(volatility_20_smooth)),
+    
+  
+    # 2ª derivada de retornos: Inflexiones
+    returns_acceleration_smooth = c(NA, diff(returns_velocity_smooth)),
+    
+    # Segunda derivada de volatilidad
+    volatility_acceleration_smooth = c(NA, diff(volatility_velocity_smooth))
+  )
+
+
+#save RDS
+saveRDS(ibex, "output/RData/ibex_eda_processed.rds")
+
+ibex <- readRDS("output/RData/ibex_eda_processed.rds")
+
+
+# Estadísticas descriptivas
+summary_returns <- data.frame(
+  Métrica = c("Media", "Mediana", "Desv_Std", "Asimetría", "Curtosis", "Min", "Max"),
+ #Valores crudos
+   Crudo = c(
+    mean(ibex$log_return_pct, na.rm = TRUE),
+    median(ibex$log_return_pct, na.rm = TRUE),
+    sd(ibex$log_return_pct, na.rm = TRUE),
+    skewness(ibex$log_return_pct, na.rm = TRUE),
+    kurtosis(ibex$log_return_pct, na.rm = TRUE),
+    min(ibex$log_return_pct, na.rm = TRUE),
+    max(ibex$log_return_pct, na.rm = TRUE)
+  ),
+ #Valores suavizados
+  Suavizado = c(
+    mean(ibex$log_return_pct_smooth, na.rm = TRUE),
+    median(ibex$log_return_pct_smooth, na.rm = TRUE),
+    sd(ibex$log_return_pct_smooth, na.rm = TRUE),
+    skewness(ibex$log_return_pct_smooth, na.rm = TRUE),
+    kurtosis(ibex$log_return_pct_smooth, na.rm = TRUE),
+    min(ibex$log_return_pct_smooth, na.rm = TRUE),
+    max(ibex$log_return_pct_smooth, na.rm = TRUE)
+  )
+)
+  
+reactViewTable(summary_returns)
+
+summary_velocity <- data.frame(
+  Variable = c("returns_velocity", "volatility_velocity", 
+               "volume_velocity", "price_momentum",
+               "returns_velocity_smooth", "volatility_velocity_smooth", 
+               "volume_velocity_smooth", "price_momentum_smooth" ),
+  Media = c(mean(ibex$returns_velocity, na.rm = TRUE),
+            mean(ibex$volatility_velocity, na.rm = TRUE),
+            mean(ibex$volume_velocity, na.rm = TRUE),
+            mean(ibex$price_momentum, na.rm = TRUE),
+            mean(ibex$returns_velocity_smooth, na.rm = TRUE),
+            mean(ibex$volatility_velocity_smooth, na.rm = TRUE),
+            mean(ibex$volume_velocity_smooth, na.rm = TRUE),
+            mean(ibex$price_momentum_smooth, na.rm = TRUE)            ),
+  Desv_Std = c(sd(ibex$returns_velocity, na.rm = TRUE),
+               sd(ibex$volatility_velocity, na.rm = TRUE),
+               sd(ibex$volume_velocity, na.rm = TRUE),
+               sd(ibex$price_momentum, na.rm = TRUE),
+               sd(ibex$returns_velocity_smooth, na.rm = TRUE),
+               sd(ibex$volatility_velocity_smooth, na.rm = TRUE),
+               sd(ibex$volume_velocity_smooth, na.rm = TRUE),
+               sd(ibex$price_momentum_smooth, na.rm = TRUE)
+               ))
+
+reactViewTable(summary_velocity)
+
+cat("\nInterpretación:\n")
+# Extraer valores numéricos
+asim_crudo     <- summary_returns$Crudo[summary_returns$Métrica == "Asimetría"]
+asim_suavizado <- summary_returns$Suavizado[summary_returns$Métrica == "Asimetría"]
+
+curt_crudo     <- summary_returns$Crudo[summary_returns$Métrica == "Curtosis"]
+curt_suavizado <- summary_returns$Suavizado[summary_returns$Métrica == "Curtosis"]
+
+# Mostrar resultados interpretados
+cat("Serie cruda:\n")
+cat(sprintf("- Asimetría: %.3f %s\n",
+            asim_crudo,
+            ifelse(asim_crudo < 0, "(negativa - cola izquierda)", "(positiva - cola derecha)")))
+cat(sprintf("- Curtosis: %.3f %s\n\n",
+            curt_crudo,
+            ifelse(curt_crudo > 3, "(leptocúrtica - colas pesadas)", "(mesocúrtica / normal)")))
+
+cat("Serie suavizada:\n")
+cat(sprintf("- Asimetría: %.3f %s\n",
+            asim_suavizado,
+            ifelse(asim_suavizado < 0, "(negativa - cola izquierda)", "(positiva - cola derecha)")))
+cat(sprintf("- Curtosis: %.3f %s\n",
+            curt_suavizado,
+            ifelse(curt_suavizado > 3, "(leptocúrtica - colas pesadas)", "(mesocúrtica / normal)")))
+```
+
+```{r log_returns_visualization}
+# Visualización: Histograma + densidad
+# Visualizar
+# Uso completo con todas las variables
+
+vars_to_plot <- c("close", "volume")
+labels_to_plot <- c("Precio de cierre", 
+                    "Volumen negociado")
+combined_plot <- diff_plot(ibex, vars_to_plot, labels_to_plot)
+
+vars_to_plot <- c("log_return_pct", "returns_velocity")
+labels_to_plot <- c("Retorno Logarítmico (%)", 
+                    "1ºdiff Retornos")
+combined_plot <- diff_plot(ibex, vars_to_plot, labels_to_plot)
+
+vars_to_plot <- c("volatility_20", "volatility_velocity")
+labels_to_plot <- c("Riesgo", 
+                    "Tasa de cambio del riesgo")
+combined_plot <- diff_plot(ibex, vars_to_plot, labels_to_plot)
+vars_to_plot <- c("volume_velocity", "returns_acceleration")
+labels_to_plot <- c("Velocidad de Volumen (%)",
+                    "Aceleración de Retornos")
+
+combined_plot <- diff_plot(ibex, vars_to_plot, labels_to_plot)
+
+
+
+
+vars_to_plot <- c("diff_close", "price_momentum")
+labels_to_plot <- c("Diferencia de precio)", 
+                    "omentum de precio)")
+combined_plot <- diff_plot(ibex, vars_to_plot, labels_to_plot)
+
+vars_to_plot <- c("returns_velocity", "volatility_acceleration")
+labels_to_plot <- c("Velocidad de Retornos",
+                    "Velocidad de Volatilidad")
+
+combined_plot <- diff_plot(ibex, vars_to_plot, labels_to_plot)
+
+
+
+
+```
+
+### Volumen: Patrones de negociación
+
+```{r volume_analysis}
+# Estadísticas descriptivas
+summary_volume <- data.frame(
+  Media = mean(ibex$volume, na.rm = TRUE),
+  Mediana = median(ibex$volume, na.rm = TRUE),
+  Desv_Std = sd(ibex$volume, na.rm = TRUE),
+  CV = sd(ibex$volume, na.rm = TRUE) / mean(ibex$volume, na.rm = TRUE)
+)
+
+reactViewTable(summary_volume)
+
+# Volumen por año
+volume_yearly <- ibex %>%
+  mutate(year = year(date)) %>%
+  group_by(year) %>%
+  summarise(
+    volume_mean = mean(volume, na.rm = TRUE),
+    volume_median = median(volume, na.rm = TRUE),
+    Desv_Std = sd(volume, na.rm = TRUE),
+    CV = sd(volume, na.rm = TRUE) / mean(volume, na.rm = TRUE) 
+  )
+
+print(volume_yearly)
+
+# Visualización
+p3 <- ggplot(ibex, aes(x = date, y = volume)) +
+  geom_line(color = "#9B59B6", size = 0.3) +
+  geom_smooth(method = "loess", color = "#E74C3C", size = 1) +
+  labs(title = "IBEX35 - Volumen de Negociación",
+       subtitle = "Línea roja: Tendencia suavizada (LOESS)",
+       x = "Fecha", y = "Volumen") +
+  scale_y_continuous(labels = comma) +
+  theme_minimal()
+
+print(p3)
+save_plot("volumen_negociacion", p3)
+```
+
+### Volatilidad realizada: Clustering de volatilidad
+
+```{r volatility_analysis}
+
+# Volatilidad rolling (ventana 20 días)
+ibex <- ibex %>%
+  arrange(date) %>%
+  mutate(
+    volatility_10 = zoo::rollapply(log_return_pct, width = 10, FUN = sd, 
+                                   fill = NA, align = "right"),
+    volatility_20 = zoo::rollapply(log_return_pct, width = 20, FUN = sd, 
+                                   fill = NA, align = "right"),
+    volatility_60 = zoo::rollapply(log_return_pct, width = 60, FUN = sd, 
+                                   fill = NA, align = "right")
+  )
+
+summary_volatility <- data.frame(
+  Media = mean(ibex$volatility_60, na.rm = TRUE),
+  Mediana = median(ibex$volatility_60, na.rm = TRUE),
+  Min = min(ibex$volatility_60, na.rm = TRUE),
+  Max = max(ibex$volatility_60, na.rm = TRUE)
+)
+
+reactViewTable(summary_volatility)
+
+# Períodos de alta volatilidad (> percentil 95)
+high_vol_threshold <- quantile(ibex$volatility_60, 0.95, na.rm = TRUE)
+high_vol_periods <- ibex %>%
+  dplyr::filter(volatility_60 > high_vol_threshold) %>%
+  dplyr::select(date, close, volatility_60)
+
+cat(sprintf("\nPeríodos de alta volatilidad (>P95 = %.3f):\n", high_vol_threshold))
+reactViewTable(high_vol_periods)
+
+# Visualización
+p4 <- ggplot(ibex, aes(x = date, y = volatility_60)) +
+  geom_line(color = "#E74C3C", size = 0.5) +
+  geom_hline(yintercept = mean(ibex$volatility_60, na.rm = TRUE),
+             linetype = "dashed", color = "black") +
+  geom_hline(yintercept = high_vol_threshold,
+             linetype = "dashed", color = "#C0392B") +
+  labs(title = "IBEX35 - Volatilidad Realizada (Rolling 20 días)",
+       subtitle = "Línea negra: Media | Línea roja: Percentil 95",
+       x = "Fecha", y = "Volatilidad (%)") +
+  theme_minimal()
+
+print(p4)
+save_plot("volatilidad_realizada", p4)
+```
+
+### Tests de normalidad (Shapiro-Wilk, Jarque-Bera)
+
+```{r normality_tests}
+# Preparar datos (sin NAs)
+returns_clean <- na.omit(ibex$log_return_pct)
+
+# Shapiro-Wilk (máximo 5000 observaciones)
+if(length(returns_clean) > 5000) {
+  returns_sample <- sample(returns_clean, 5000)
+  shapiro_test <- shapiro.test(returns_sample)
+  cat("Shapiro-Wilk (muestra n=5000):\n")
+} else {
+  shapiro_test <- shapiro.test(returns_clean)
+  cat("Shapiro-Wilk:\n")
+}
+
+print(shapiro_test)
+
+# Jarque-Bera
+jb_test <- jarque.bera.test(returns_clean)
+cat("\nJarque-Bera:\n")
+print(jb_test)
+
+# Interpretación
+cat("\nInterpretación:\n")
+cat(sprintf("- Shapiro-Wilk: p-valor = %.4f %s\n",
+            shapiro_test$p.value,
+            ifelse(shapiro_test$p.value < 0.05, 
+                   "→ RECHAZA normalidad", 
+                   "→ No rechaza normalidad")))
+cat(sprintf("- Jarque-Bera: p-valor = %.4f %s\n",
+            jb_test$p.value,
+            ifelse(jb_test$p.value < 0.05, 
+                   "→ RECHAZA normalidad", 
+                   "→ No rechaza normalidad")))
+
+# Q-Q Plot
+p5 <- ggplot(ibex %>% filter(!is.na(log_return_pct)), aes(sample = log_return_pct)) +
+  stat_qq(color = "#3498DB", alpha = 0.5) +
+  stat_qq_line(color = "#E74C3C", size = 1) +
+  labs(title = "IBEX35 - Q-Q Plot de Retornos",
+       subtitle = "Comparación con distribución normal",
+       x = "Cuantiles teóricos", y = "Cuantiles muestrales") +
+  theme_minimal()
+
+print(p5)
+save_plot("qq_plot_retornos", p5)
+```
+
+### Resumen
+
+```{r resumen_eda}
+cat("\n" , rep("=", 72), "\n")
+cat("RESUMEN - ANÁLISIS UNIVARIANTE IBEX35\n")
+cat(rep("=", 72), "\n\n")
+cat("PRECIO DE CIERRE:\n")
+cat(sprintf("  - Rango: %.2f - %.2f\n", summary_price$Mínimo, summary_price$Máximo))
+cat(sprintf("  - Media: %.2f | Mediana: %.2f\n", summary_price$Media, summary_price$Mediana))
+
+cat("\nRETORNOS:\n")
+cat(sprintf("  - Media: %.4f%% (diaria)\n", summary_returns$Media))
+cat(sprintf("  - Volatilidad: %.4f%%\n", summary_returns$Desv_Std))
+cat(sprintf("  - Asimetría: %.3f %s\n", summary_returns$Asimetría,
+            ifelse(summary_returns$Asimetría < 0, "(negativa)", "(positiva)")))
+cat(sprintf("  - Curtosis: %.3f (colas %s)\n", summary_returns$Curtosis,
+            ifelse(summary_returns$Curtosis > 3, "pesadas", "normales")))
+
+cat("\nVOLUMEN:\n")
+cat(sprintf("  - Media: %s\n", format(summary_volume$Media, big.mark = ",")))
+cat(sprintf("  - CV: %.2f (alta variabilidad)\n", summary_volume$CV))
+
+cat("\nVOLATILIDAD:\n")
+cat(sprintf("  - Media: %.3f%%\n", summary_volatility$Media))
+cat(sprintf("  - Rango: %.3f%% - %.3f%%\n", summary_volatility$Min, summary_volatility$Max))
+
+cat("\nNORMALIDAD:\n")
+cat(sprintf("  - Shapiro-Wilk p-valor: %.4f → %s\n",
+            shapiro_test$p.value,
+            ifelse(shapiro_test$p.value < 0.05, "NO NORMAL", "Normal")))
+cat(sprintf("  - Jarque-Bera p-valor: %.4f → %s\n",
+            jb_test$p.value,
+            ifelse(jb_test$p.value < 0.05, "NO NORMAL", "Normal")))
+
+cat("\n", rep("=", 80), "\n")
+
+# Guardar datos procesados
+saveRDS(ibex, "output/RData/ibex_eda_processed.rds")
+cat("\n✓ Datos procesados guardados en: output/RData/ibex_eda_processed.rds\n")
+```
+
+## Propiedades de Series Temporales
+
+Seleccionar los retornos logarítmicos y los datos de cierre para el análisis de propiedades de series temporales.
+
+```{r convert_xts}
+# Cargar datos ibex preprocesados
+ibex <- readRDS("output/RData/ibex_eda_processed.rds")
+# Datos para análisis de series temporales
+ibex_close_ts <- ibex %>%
+  dplyr::select(date, close) %>%
+  na.omit()
+ibex_return_ts <- ibex %>%
+  dplyr::select(date, log_return_pct) %>%
+  na.omit()
+
+# Convertir a series temporales
+ibex_close_xts <- xts::xts(ibex_close_ts$close,
+                           order.by = ibex_close_ts$date)
+ibex_return_xts <- xts::xts(ibex_return_ts$log_return_pct,
+                            order.by = ibex_return_ts$date)
+
+ibex_return_xts <- na.omit(ibex_return_xts)
+
+```
+
+### Estacionalidad: Test ADF, KPSS, Phillips-Perron
+
+```{r estacionariedad_tests}
+# PRECIOS
+#Estacionariedad en niveles de precio: Augmented Dickey-Fuller (ADF) test 
+adf_price <- adf.test(ibex_close_xts)
+# Kwiatkowski–Phillips–Schmidt–Shin (KPSS) test: Estacionalidad alrededor de una tendendia
+kpss_price <- kpss.test(ibex_close_xts)
+# Phillips-Perron (PP) test: usado para comprobar la presencia de una unidad raiz (unit root) en una serie temporal uni-variante, lo que implica no-estacionariedad.
+pp_price <- tseries::pp.test(ibex_close_xts)
+
+
+
+# RETORNOS
+#Estacionariedad en niveles de precio: Augmented Dickey-Fuller (ADF) test 
+adf_returns <- adf.test(ibex_return_xts)
+# Kwiatkowski–Phillips–Schmidt–Shin (KPSS) test: Estacionariedad alrededor de una tendendia
+kpss_returns <- kpss.test(ibex_return_xts)
+# Phillips-Perron (PP) test: usado para comprobar la presencia de una unidad raiz (unit root) en una serie temporal uni-variante, lo que implica no-estacionariedad.
+pp_returns <- tseries::pp.test(ibex_return_xts)
+
+```
+
+```{r estacionariedad_summary}
+cat("\n--- RESUMEN ESTACIONARIEDAD ---\n")
+cat("PRECIOS:\n")
+cat(sprintf("  ADF p-valor: %.4f → %s\n", adf_price$p.value,
+            ifelse(adf_price$p.value < 0.05, "ESTACIONARIO", "NO ESTACIONARIO")))
+cat(sprintf("  KPSS p-valor: %.4f → %s\n", kpss_price$p.value,
+            ifelse(kpss_price$p.value > 0.05, "ESTACIONARIO", "NO ESTACIONARIO")))
+
+cat("\nRETORNOS:\n")
+cat(sprintf("  ADF p-valor: %.4f → %s\n", adf_returns$p.value,
+            ifelse(adf_returns$p.value < 0.05, "ESTACIONARIO", "NO ESTACIONARIO")))
+cat(sprintf("  KPSS p-valor: %.4f → %s\n", kpss_returns$p.value,
+            ifelse(kpss_returns$p.value > 0.05, "ESTACIONARIO", "NO ESTACIONARIO")))
+```
+
+### Autocorrelación: ACF, PACF (identificar orden AR/MA)
+
+```{r autocorrelacion_plots}
+# Retornos al cuadrado (para detectar ARCH/GARCH)
+returns_sq <- ibex_return_xts^2
+#Guardar gráficos ACF y PACF de cierre, retornos y retornos²
+save_base_plot(
+  plotname = "ACF_PACF - Cierre",
+  plot_function = function() {
+    acf(ibex_close_xts, lag.max = 40, main = "ACF - Cierre")
+    pacf(ibex_close_xts, lag.max = 40, main = "PACF - Cierre")
+ },
+  par_settings = list(mfrow = c(2, 1)))
+
+save_base_plot(
+  plotname = "ACF_PACF - Retornos",
+  plot_function = function() {
+    acf(ibex_return_xts, lag.max = 40, main = "ACF - Retornos")
+    pacf(ibex_return_xts, lag.max = 40, main = "PACF - Retornos")
+  },
+  par_settings = list(mfrow = c(2, 1)))
+
+# Test de Ljung-Box
+lb_test <- Box.test(ibex_return_xts, lag = 20, type = "Ljung-Box")
+cat("\nLjung-Box (lag=20):\n")
+print(lb_test)
+cat(sprintf("→ %s autocorrelación\n",
+            ifelse(lb_test$p.value < 0.05, "Hay", "No hay")))
+
+# Test de Ljung-Box para retornos²
+lb_test_sq <- Box.test(returns_sq, lag = 20, type = "Ljung-Box")
+cat("\nLjung-Box para retornos² (lag=20):\n")
+print(lb_test_sq)
+cat(sprintf("→ %s efectos ARCH\n",
+            ifelse(lb_test_sq$p.value < 0.05, "Hay", "No hay")))
+```
+
+### Estacionalidad: Descomposición STL, efectos calendario
+
+```{r STL}
+# Descomposición STL de precios
+# STL decomposition
+#Usamos el cierre suavizado. 
+ts_close <- ts(ibex$close_smooth, frequency = 252)
+stl_decomp <- stl(ts_close, s.window = "periodic")
+# Plot STL decomposition
+save_base_plot(
+  plotname = "stl_decomposition",
+  plot_function = function(){
+    plot(stl_decomp)},
+  show_plot = TRUE)
+
+#Usamos el cierre crudo por comparación a la serie suavizada. 
+ts_close <- ts(ibex$close, frequency = 252)
+stl_decomp <- stl(ts_close, s.window = "periodic")
+
+# Plot STL decomposition
+save_base_plot(
+  plotname = "stl_decomposition",
+  plot_function = function(){
+    plot(stl_decomp)},
+  show_plot = TRUE)
+```
+
+```{r efectos_calendario}
+# Efectos calendario: Día de la semana y mes
+
+
+# Efectos calendario en el cierre
+close_weekday <- ibex %>%
+  dplyr::filter(!is.na(close)) %>%
+  dplyr::group_by(weekday) %>%
+  dplyr::summarise(mean_return = mean(close)) |>   
+  dplyr::mutate(weekday = factor(weekday,
+                         levels = c("lunes", "martes", "miércoles", "jueves", "viernes"))) |>   # orden natural
+  dplyr::arrange(weekday)
+
+reactViewTable(close_weekday)
+
+close_month <- ibex %>%
+  dplyr::filter(!is.na(close)) %>%
+  dplyr::group_by(month) %>%
+  dplyr::summarise(mean_return = mean(close)) %>%
+  dplyr::mutate(month = factor(month,
+                        levels = c("ene", "feb", "mar", "abr", "may", "jun",
+                                   "jul", "ago", "sep", "oct", "nov", "dic"))) %>%
+  dplyr::arrange(month)
+reactViewTable(close_month)
+# Efectos calendario en el retorno
+returns_weekday <- ibex %>%
+  dplyr::filter(!is.na(log_return_pct)) %>%
+  dplyr::group_by(weekday) %>%
+  dplyr::summarise(mean_return = mean(log_return_pct)) |>   
+  dplyr::mutate(weekday = factor(weekday,
+                         levels = c("lunes", "martes", "miércoles", "jueves", "viernes"))) |>   # orden natural
+  dplyr::arrange(weekday)
+
+reactViewTable(returns_weekday)
+
+returns_month <- ibex %>%
+  dplyr::filter(!is.na(log_return_pct)) %>%
+  dplyr::group_by(month) %>%
+  dplyr::summarise(mean_return = mean(log_return_pct)) %>%
+  dplyr::mutate(month = factor(month,
+                        levels = c("ene", "feb", "mar", "abr", "may", "jun",
+                                   "jul", "ago", "sep", "oct", "nov", "dic"))) %>%
+  dplyr::arrange(month)
+reactViewTable(returns_month)
+
+# Visualización
+# Cierres por día de la semana y mes
+p1 <- ggplot(ibex, aes(x = weekday, y = close)) +
+  geom_boxplot(fill = "#2C3E50", alpha = 0.7
+) +
+  labs(title = "IBEX35 - Cierres por Día de la Semana",
+       x = "Día de la Semana", y = "Precio de Cierre") +
+  theme_minimal()+
+   theme(axis.text.x = element_text(angle = 30, hjust = 0.5, vjust = 0.5))
+
+p2 <- ggplot(ibex, aes(x = month, y = close)) +
+  geom_boxplot(fill = "#8E44AD", alpha = 0.7) +
+  labs(title = "IBEX35 - Cierres por Mes",
+       x = "Mes", y = "Precio de Cierre") +
+  theme_minimal()+
+   theme(axis.text.x = element_text(angle = 30, hjust = 0.5, vjust = 0.5))
+
+p3 <- ggplot(ibex, aes(x = quarter, y = close)) +
+  geom_boxplot(fill = "#8E44AD", alpha = 0.7) +
+  labs(title = "IBEX35 - Cierres por Mes",
+       x = "Mes", y = "Precio de Cierre") +
+  theme_minimal()+
+   theme(axis.text.x = element_text(angle = 30, hjust = 0.5, vjust = 0.5))
+
+p <- (p1 + p3) / p2  + plot_layout(heights = c(2,1))
+print(p)
+save_plot("efectos_calendario_cierres", p)
+
+
+# Retornos por día de la semana y mes
+p1 <- ggplot(ibex, aes(x = weekday, y = log_return_pct)) +
+  geom_boxplot(fill = "#3498DB", alpha = 0.7) +
+  labs(title = "IBEX35 - Retornos por Día de la Semana",
+       x = "Día de la Semana", y = "Retornos (%)") +
+  theme_minimal() +
+   theme(axis.text.x = element_text(angle = 30, hjust = 0.5, vjust = 0.5))
+
+p2 <- ggplot(ibex, aes(x = month, y = log_return_pct)) +
+  geom_boxplot(fill = "#E74C3C", alpha = 0.7) +
+  labs(title = "IBEX35 - Retornos por Mes",
+       x = "Mes", y = "Retornos (%)") +
+  theme_minimal() +
+   theme(axis.text.x = element_text(angle = 30, hjust = 0.5, vjust = 0.5))
+
+p3 <- ggplot(ibex, aes(x = quarter, y = log_return_pct)) +
+  geom_boxplot(fill = "#E74C3C", alpha = 0.7) +
+  labs(title = "IBEX35 - Retornos por Mes",
+       x = "Mes", y = "Retornos (%)") +
+  theme_minimal() +
+   theme(axis.text.x = element_text(angle = 30, hjust = 0.5, vjust = 0.5))
+
+p <- (p1 + p3) / p2  + plot_layout(heights = c(3, 1))
+print(p)
+
+save_plot("efectos_calendario_retornos", p)
+
+```
+
+### Heterocedasticidad: Test ARCH-LM
+
+```{r ARCH-LM}
+# Test ARCH-LM
+arch_test <- ArchTest(ibex_return_xts, lags = 12)
+cat("ARCH-LM Test (12 lags):\n")
+print(arch_test)
+
+cat(sprintf(
+  "\np-valor: %.4f → %s efectos ARCH\n",
+  arch_test$p.value,
+  ifelse(arch_test$p.value < 0.05,
+    "HAY (volatilidad agrupada)",
+    "NO HAY"
+  )
+))
+```
+
+```{r visualization_returns}
+# Visualización: Retornos² vs tiempo (evidencia visual ARCH)
+ibex <- ibex %>%
+  mutate(returns_squared = log_return_pct^2)
+#save RDS
+saveRDS(ibex, "output/RData/ibex_eda_processed.rds")
+
+ibex <- readRDS("output/RData/ibex_eda_processed.rds")
+
+
+p <- ggplot(
+  ibex %>% filter(!is.na(returns_squared)),
+  aes(x = date, y = returns_squared)
+) +
+  geom_line(color = "#E74C3C", alpha = 0.5) +
+  geom_smooth(method = "loess", color = "#2C3E50", linewidth = 1) +
+  labs(
+    title = "IBEX35 - Retornos al Cuadrado (Proxy Volatilidad)",
+    subtitle = "Clustering de volatilidad (efecto ARCH)",
+    x = "Fecha", y = "Retornos²"
+  ) +
+  theme_minimal()
+print(p)
+save_plot("squared_returns", p)
+```
+
+### Relación con retornos futuros
+
+```{r correlations}
+
+# Crear retornos futuros
+ibex <- ibex %>%
+  mutate(
+    returns_next = lead(log_return_pct, 1),
+    returns_next_5 = lead(log_return_pct, 5)
+  )
+
+
+# Correlaciones
+correlations <- data.frame(
+  Variable = c("returns", "returns_velocity", "returns_acceleration",
+               "volatility_20", "volatility_velocity"),
+  Cor_t1 = c(
+    cor(ibex$log_return_pct, ibex$returns_next, use = "complete.obs"),
+    cor(ibex$returns_velocity, ibex$returns_next, use = "complete.obs"),
+    cor(ibex$returns_acceleration, ibex$returns_next, use = "complete.obs"),
+    cor(ibex$volatility_20, ibex$returns_next, use = "complete.obs"),
+    cor(ibex$volatility_velocity, ibex$returns_next, use = "complete.obs")
+  ),
+  Cor_t5 = c(
+    cor(ibex$log_return_pct, ibex$returns_next_5, use = "complete.obs"),
+    cor(ibex$returns_velocity, ibex$returns_next_5, use = "complete.obs"),
+    cor(ibex$returns_acceleration, ibex$returns_next_5, use = "complete.obs"),
+    cor(ibex$volatility_20, ibex$returns_next_5, use = "complete.obs"),
+    cor(ibex$volatility_velocity, ibex$returns_next_5, use = "complete.obs")
+  )
+)
+
+cat("Correlación con retornos futuros:\n\n")
+print(correlations, row.names = FALSE)
+
+cat("\nInterpretación:\n")
+cat("  • Si |Cor| > 0.05: Variable tiene poder predictivo\n")
+cat("  • Derivadas pueden capturar momentum que precio simple no detecta\n")
+
+predictions <- tibble(correlations$Variable, 
+                      cort_1 = ifelse(abs(correlations$Cor_t1) >0.05, correlations$Variable, FALSE),
+                      cort_5 = ifelse(abs(correlations$Cor_t5) >0.05, correlations$Variable, FALSE)) |>
+  dplyr::filter(cort_1 | cort_5)
+
+print("=== Relación con retornos futuros ===")
+if(nrow(predictions) > 0) {
+  print(predictions)
+} else {
+  print("No son variables con poder predictivo sobre el precio")
+}
+```
+
+### Visualizaciones de derivadas
+
+```{r}
+
+library(patchwork)
+
+# Datos recientes para visualización
+ibex_recent <- ibex %>% 
+  filter(date >= max(date) - 500) %>%
+  filter(!is.na(returns_velocity))
+
+# Plot 1: Retornos vs Primera Derivada
+p1 <- ggplot(ibex_recent, aes(x = date)) +
+  geom_line(aes(y = log_return_pct), color = "#3498DB", alpha = 0.7) +
+  geom_line(aes(y = returns_velocity * 10), color = "#E74C3C", alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Retornos vs Velocidad de Cambio",
+       subtitle = "Azul: Retornos | Rojo: Velocidad (×10)",
+       y = "Valor", x = "Fecha") +
+  theme_minimal()
+
+# Plot 2: Volatilidad vs Primera Derivada
+p2 <- ggplot(ibex_recent, aes(x = date)) +
+  geom_line(aes(y = volatility_20), color = "#9B59B6", alpha = 0.7) +
+  geom_line(aes(y = volatility_velocity * 5), color = "#E67E22", alpha = 0.7) +
+  labs(title = "Volatilidad vs Velocidad",
+       subtitle = "Morado: Volatilidad | Naranja: Velocidad (×5)",
+       y = "Valor", x = "Fecha") +
+  theme_minimal()
+
+# Plot 3: Aceleración
+p3 <- ggplot(ibex_recent, aes(x = date, y = returns_acceleration)) +
+  geom_line(color = "#27AE60", alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Aceleración de Retornos (2ª Derivada)",
+       y = "Aceleración", x = "Fecha") +
+  theme_minimal()
+
+# Scatter: Velocidad vs Retornos futuros
+p4 <- ggplot(ibex %>% filter(!is.na(returns_velocity) & !is.na(returns_next)),
+             aes(x = returns_velocity, y = returns_next)) +
+  geom_point(alpha = 0.2, color = "#3498DB") +
+  geom_smooth(method = "lm", color = "#E74C3C") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(title = "Velocidad vs Retornos Futuros (t+1)",
+       x = "Velocidad de cambio (1ª derivada)",
+       y = "Retornos t+1") +
+  theme_minimal()
+
+p_derivatives <- (p1 + p2) / (p3 + p4) +
+  plot_annotation(title = "Análisis de Derivadas - IBEX35")
+print(p_derivatives)
+save_plot("analisis_derivadas", p_derivatives)
+```
+
+### Tendencia: Identificación de regímenes de mercado basados en derivadas
+
+```{r tendencia}
+
+# ANÁLISIS DE REGÍMENES DE MERCADO
+
+
+cat("\n5. CLASIFICACIÓN DE REGÍMENES\n\n")
+
+# 5.1 Crear clasificaciones de régimen
+ibex <- ibex %>%
+  mutate(
+    # Régimen basado en primera y segunda derivada
+    momentum_regime = case_when(
+      returns_velocity_smooth > 0 & returns_acceleration_smooth > 0 ~ "Aceleración Alcista",
+      returns_velocity_smooth > 0 & returns_acceleration_smooth <= 0 ~ "Desaceleración Alcista",
+      returns_velocity_smooth <= 0 & returns_acceleration_smooth > 0 ~ "Recuperación Alcista",
+      returns_velocity_smooth <= 0 & returns_acceleration_smooth <= 0 ~ "Aceleración bajista"
+    ),
+    # Régimen basado en SMA 200
+    sma_200 = zoo::rollmean(close, k = 200, fill = NA),
+    regime_sma = if_else(close > sma_200, "Alcista", "Bajista"),
+    momentum_regime = factor(momentum_regime),
+    regime_sma = factor(regime_sma)
+  )
+
+#save ibex rds
+saveRDS(ibex, "output/RData/ibex_eda_processed.rds")
+
+
+# 5.2 Estadísticas por régimen de momentum
+regime_stats_momentum <- ibex %>%
+  filter(!is.na(momentum_regime), !is.na(returns_next)) %>%
+  group_by(momentum_regime) %>%
+  summarise(
+    n_days = n(),
+    pct_days = 100 * n() / nrow(ibex),
+    mean_return_next = mean(returns_next),
+    sd_return_next = sd(returns_next),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_return_next))
+
+cat("Retornos futuros por régimen de momentum:\n")
+reactViewTable(regime_stats_momentum)
+
+# 5.3 Estadísticas por régimen SMA
+regime_stats_sma <- ibex %>%
+  filter(!is.na(regime_sma)) %>%
+  group_by(regime_sma) %>%
+  summarise(
+    n_days = n(),
+    pct_days = 100 * n() / nrow(ibex),
+    mean_return = mean(log_return_pct, na.rm = TRUE),
+    sd_return = sd(log_return_pct, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("\nEstadísticas por régimen SMA 200:\n")
+reactViewTable(regime_stats_sma)
+
+# 5.4 Visualización
+#SMA
+p_regime_sma <- ggplot(ibex %>% filter(!is.na(regime_sma))) +
+  geom_col(aes(x = date, y = close, fill = regime_sma), linewidth = 0.5) +
+  scale_color_manual(values = c("Alcista" = "#00ba38", "Bajista" = "#f8766d")) +
+  labs(title = "Regímenes de Mercado (SMA 200)", 
+       x = "Año", y = "Precio cierre", color = "Régimen") +
+  theme_minimal()
+
+save_plot("regimenes_mercado", p_regime_sma)
+print(p_regime_sma)
+
+#Momentum
+p_regime_momentum <- ggplot(ibex %>% filter(!is.na(momentum_regime))) +
+  geom_col(aes(x = date, y = close, fill = momentum_regime), linewidth = 0.5) +
+  scale_color_brewer() +
+  labs(title = "Regímenes de Mercado Momentum", 
+       x = "Año", y = "Precio cierre", color = "Régimen") +
+  theme_minimal()
+
+
+
+print(p_regime_momentum)
+
+save_plot("regimenes_mercado", p_regime_momentum)
+```
+
+### Resumen
+
+```{r Resumen_ts}
+
+cat("\n", rep("=", 80), "\n")
+cat("RESUMEN - PROPIEDADES SERIES TEMPORALES\n")
+cat(rep("=", 80), "\n\n")
+
+cat("ESTACIONARIEDAD:\n")
+cat("  Precios: NO ESTACIONARIOS (como esperado)\n")
+cat("  Retornos: ESTACIONARIOS ✓\n")
+cat("  → Usar RETORNOS para modelado\n")
+
+cat("\nAUTOCORRELACIÓN:\n")
+cat(sprintf(
+  "  Ljung-Box p-valor: %.4f → %s\n",
+  lb_test$p.value,
+  ifelse(lb_test$p.value < 0.05, "Hay autocorrelación", "No hay autocorrelación")
+))
+cat("  → Considerar modelos ARMA/ARIMA\n")
+
+cat("\nESTACIONALIDAD:\n")
+cat("  Efectos calendario detectados (análisis por día/mes)\n")
+cat("  → Considerar variables dummy temporales\n")
+
+cat("\nHETEROCEDASTICIDAD:\n")
+cat(sprintf(
+  "  ARCH-LM p-valor: %.4f → %s\n",
+  arch_test$p.value,
+  ifelse(arch_test$p.value < 0.05, "HAY efectos ARCH", "NO HAY efectos ARCH")
+))
+cat("  → Considerar modelos GARCH\n")
+
+cat("\n", rep("=", 80), "\n")
+cat("RESUMEN - ANÁLISIS DE DERIVADAS Y REGÍMENES\n")
+cat(rep("=", 80), "\n\n")
+
+cat("VARIABLES CREADAS:\n")
+cat("  Primera derivada:\n")
+cat("    - returns_velocity, volatility_velocity, volume_velocity\n")
+cat("    - price_momentum\n")
+cat("  Segunda derivada:\n")
+cat("    - returns_acceleration, volatility_acceleration\n")
+cat("  Clasificación:\n")
+cat("    - momentum_regime (4 categorías basadas en derivadas)\n")
+cat("    - regime_sma (2 categorías basadas en SMA 200)\n")
+
+cat("\nDISTRIBUCIÓN REGÍMENES SMA:\n")
+for (i in 1:nrow(regime_stats_sma)) {
+  cat(sprintf("  %s: %d días (%.1f%%) | Retorno medio: %.3f%%\n",
+              regime_stats_sma$regime_sma[i],
+              regime_stats_sma$n_days[i],
+              regime_stats_sma$pct_days[i],
+              regime_stats_sma$mean_return[i]))
+}
+
+cat("\nREGÍMENES MOMENTUM (ordenados por retorno futuro):\n")
+for (i in 1:nrow(regime_stats_momentum)) {
+  cat(sprintf("  %s: n=%d (%.1f%%)| Retorno siguiente: %.3f%% (±%.3f%%)\n",
+              regime_stats_momentum$momentum_regime[i],
+              regime_stats_momentum$n_days[i],
+              regime_stats_momentum$pct_days[i],
+              regime_stats_momentum$mean_return_next[i],
+              regime_stats_momentum$sd_return_next[i]
+              ))
+}
+
+cat("\nIMPLICACIONES PARA MODELADO:\n")
+cat("  • Las derivadas capturan cambios de tendencia\n")
+cat("  • Los regímenes muestran diferentes distribuciones de retornos\n")
+cat("  • Útiles como features adicionales para ML\n")
+cat("  • Considerar modelos con cambio de régimen\n")
+
+cat("\n", rep("=", 80), "\n\n")
+```
+
+```{r limpiar_entorno}
+#| include: false
+
+#Global variables
+output_path <- "output"
+image_number <- 32
+table_number <- 14
+set.seed(123) # For reproducibility
+# Source general functions
+source("code/R/01.general_functions.R")
+create_directories(output_path)
+source("code/R/02.EDA_functions.R")
+all_stocks_df <- read_parquet(paste0(output_path,"/tables/all_indices.parquet"))
+all_companies_df <- read_parquet(paste0(output_path,"/tables/ibex35_companies_all.parquet"))
+# Cargar datos ibex preprocesados
+ibex <- readRDS("output/RData/ibex_eda_processed.rds")
+```
+
+## Análisis Multivariante
+
+```{r correlation_index}
+# Preparar matriz de retornos
+returns_matrix <- all_stocks_df %>%
+  dplyr::group_by(index) %>%
+  dplyr::select(date, close) %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(returns = c(NA, diff(log(close))) * 100) %>%
+  dplyr::select(date, index, returns) %>%
+  pivot_wider(names_from = index, values_from = returns)
+
+# Eliminar filas con NA
+returns_matrix <- returns_matrix %>%
+  na.omit()
+## Matriz de correlación (solo columnas numéricas, sin date)
+cor_matrix <- returns_matrix %>%
+  dplyr::select(-date) %>%
+  cor(use = "pairwise.complete.obs")
+
+print(round(cor_matrix, 3))
+
+
+```
+
+### Correlaciones: Matriz entre índices internacionales
+
+```{r plot_correlation}
+# Correlaciones con IBEX35
+ibex_correlations <- data.frame(
+  Index = rownames(cor_matrix),
+  Correlation = cor_matrix[, "ibex35"]
+) %>%
+  arrange(desc(abs(Correlation)))
+
+# Visualización: Mapa de calor
+# Guardar mapa de calor
+save_base_plot("correlation_matrix",
+               plot_function = function(){
+                 par(mar = c(1, 1, 3, 1))  # Aumenta el margen superior
+                 corrplot(cor_matrix, method = "color", type = "upper",
+                          tl.col = "black", tl.srt = 45,
+                          addCoef.col = "black", number.cex = 0.7,
+                          col = colorRampPalette(c("#E74C3C", "white", "#27AE60"))(200),
+                          title = "Matriz de Correlaciones - Índices Bursátiles",
+                          mar = c(0, 0, 2, 0)  # Márgenes internos de corrplot
+                          )
+                 }
+               )
+
+```
+
+### Análisis sectorial: Comportamiento por sectores IBEX
+
+```{r analisis sectorial}
+# Cargar empresas
+all_companies_df <- readRDS("output/RData/stocks_companies.rds")
+
+# Retornos por sector
+sector_returns <- all_companies_df %>%
+  map_dfr(~ mutate(.x, returns = c(NA, diff(log(close))) * 100)) %>%
+  filter(!is.na(returns)) %>%
+  group_by(sector) %>%
+  summarise(
+    n_empresas = n_distinct(ticker),
+    mean_close = mean(close, na.rm = TRUE),
+    sd_close = mean(close, na.rm = TRUE),
+    mean_return = mean(returns, na.rm = TRUE),
+    sd_return = sd(returns, na.rm = TRUE),
+    sharpe_return = mean_return / sd_return,# Rf=0
+    
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_return))
+
+cat("\nRendimiento por sector:\n")
+print(sector_returns)
+
+# Visualización
+p_sector <- ggplot(sector_returns, aes(x = reorder(sector, mean_return), 
+                                       y = mean_return)) +
+  geom_col(aes(fill = mean_return > 0), show.legend = FALSE) +
+  geom_text(aes(label = sprintf("%.3f%%", mean_return)), 
+            hjust = ifelse(sector_returns$mean_return > 0, -0.1, 1.1), 
+            size = 3) +
+  scale_fill_manual(values = c("#E74C3C", "#27AE60")) +
+  coord_flip() +
+  labs(title = "Retornos Medios por Sector - IBEX35",
+       x = NULL, y = "Retorno medio diario (%)") +
+  theme_minimal()
+print(p_sector)
+save_plot("retorno_sector_ibex", p_sector)
+
+# Visualización precio al cierre por sector
+p_sector_cierre <- ggplot(sector_returns, aes(x = reorder(sector, mean_close), 
+                                       y = mean_close)) +
+  geom_col(aes(fill = mean_close > 0), show.legend = FALSE) +
+  geom_text(aes(label = round(mean_close,2)), 
+            hjust = ifelse(sector_returns$mean_close > 0, -0.1, 1.1), 
+            size = 3) +
+  scale_fill_manual(values = c("#E74C3C", "#27AE60")) +
+  coord_flip() +
+  labs(title = "Precios al cierre Medios por Sector - IBEX35",
+       x = NULL, y = "Cierre medio diario") +
+  theme_minimal()
+print(p_sector_cierre)
+save_plot("cierre_sector_ibex", p_sector_cierre)
+
+```
+
+### Causalidad de Granger: ¿Qué índices predicen al IBEX?
+
+```{r Granger}
+
+# Preparar datos para test (IBEX vs otros índices principales)
+indices_principales <- c("s_p500",  "dax", "nikkei225", "ftse100", "volatility_index",  "euro_dollar",
+                         "gold", "oil",  "euro_next100")      
+
+granger_results <- list()
+
+for (idx in indices_principales) {
+  if (idx %in% colnames(returns_matrix)) {
+    # Datos completos
+    data_granger <- returns_matrix %>%
+      dplyr::select(ibex35, all_of(idx)) %>%
+      na.omit()
+
+    # Test: ¿idx causa IBEX?
+    tryCatch(
+      {
+        test <- grangertest(ibex35 ~ get(idx), data = data_granger, order = 5)
+        granger_results[[idx]] <- data.frame(
+          Index = idx,
+          F_stat = test$F[2],
+          p_value = test$`Pr(>F)`[2],
+          Causa = ifelse(test$`Pr(>F)`[2] < 0.05, "SÍ", "NO")
+        )
+      },
+      error = function(e) {
+        cat(sprintf("Error en %s: %s\n", idx, e$message))
+      }
+    )
+  }
+}
+
+granger_df <- bind_rows(granger_results)
+granger_df <- granger_df |> 
+  arrange(p_value, Index)
+cat("\nTest de Causalidad de Granger (lag=5):\n")
+cat("H0: El índice NO causa (en sentido Granger) al IBEX35\n\n")
+print(granger_df)
+```
+
+### Cointegración: Relaciones de largo plazo (test de Johansen)
+
+```{r}
+
+# Usar precios (niveles) para cointegración
+prices_matrix <- all_stocks_df %>%
+  dplyr::select(index, date, close) |> 
+  pivot_wider(names_from = index, values_from = close) %>%
+  dplyr::arrange(date) |> 
+  dplyr::select(-date) %>%
+  tidyr::drop_na() 
+
+# Test de Johansen (IBEX + principales índices europeos)
+indices_coint <- c("ibex35", "dax", "ftse100", "euro_next100")
+prices_coint <- prices_matrix %>% dplyr::select(all_of(indices_coint))
+
+johansen_test <- ca.jo(prices_coint, type = "trace", ecdet = "const", K = 2)
+
+cat("\nTest de Johansen (IBEX35, DAX, FTSE100, SBF120, EuroNext100):\n")
+print(summary(johansen_test))
+```
+
+### Análisis de componentes principales: Reducción dimensionalidad
+
+```{r}
+
+# PCA sobre retornos estandarizados
+returns_scaled <- returns_matrix %>%
+  dplyr::select(-date) %>%
+  na.omit() %>%
+  scale()
+
+pca_result <- prcomp(returns_scaled, center = FALSE, scale. = FALSE)
+
+# Varianza explicada
+var_explained <- summary(pca_result)$importance[2, ]
+cum_var <- summary(pca_result)$importance[3, ]
+
+cat("\nVarianza explicada por componente:\n")
+print(round(var_explained[1:5], 4))
+
+cat("\nVarianza acumulada:\n")
+print(round(cum_var[1:5], 4))
+
+# Visualización: Scree plot
+pca_df <- data.frame(
+  PC = 1:length(var_explained),
+  Variance = var_explained,
+  Cumulative = cum_var
+)
+
+p_pca <- ggplot(pca_df[1:10, ], aes(x = PC, y = Variance)) +
+  geom_col(fill = "#3498DB") +
+  geom_line(aes(y = Cumulative), color = "#E74C3C", size = 1.5) +
+  geom_point(aes(y = Cumulative), color = "#E74C3C", size = 3) +
+  scale_y_continuous(sec.axis = sec_axis(~., name = "Varianza Acumulada")) +
+  labs(
+    title = "PCA - Varianza Explicada",
+    subtitle = "Barras: Individual | Línea: Acumulada",
+    x = "Componente Principal", y = "Proporción de Varianza"
+  ) +
+  theme_minimal()
+print(p_pca)
+save_plot("PCA",p_pca)
+
+# Loadings del PC1
+loadings_pc1 <- data.frame(
+  Index = rownames(pca_result$rotation),
+  Loading = pca_result$rotation[, 1]
+) %>%
+  arrange(desc(abs(Loading)))
+
+cat("\nLoadings PC1 (factor común de mercado):\n")
+print(loadings_pc1)
+```
+
+### Resumen
+
+```{r}
+
+cat("\n", rep("=", 80), "\n")
+cat("RESUMEN - ANÁLISIS MULTIVARIANTE\n")
+cat(rep("=", 80), "\n\n")
+
+cat("CORRELACIONES:\n")
+cat(sprintf(
+  "  Más correlacionado con IBEX: %s (r=%.3f)\n",
+  ibex_correlations$Index[2], ibex_correlations$Correlation[2]
+))
+
+cat("\nSECTORES:\n")
+cat(sprintf(
+  "  Mejor sector: %s (%.3f%%)\n",
+  sector_returns$sector[1], sector_returns$mean_return[1]
+))
+cat(sprintf(
+  "  Peor sector: %s (%.3f%%)\n",
+  sector_returns$sector[nrow(sector_returns)],
+  sector_returns$mean_return[nrow(sector_returns)]
+))
+
+cat("\nCAUSALIDAD GRANGER:\n")
+if (nrow(granger_df) > 0) {
+  causantes <- granger_df %>% filter(Causa == "SÍ")
+  if (nrow(causantes) > 0) {
+    cat("  Índices que causan IBEX35:\n")
+    for (i in 1:nrow(causantes)) {
+      cat(sprintf("    - %s (p=%.4f)\n", causantes$Index[i], causantes$p_value[i]))
+    }
+  } else {
+    cat("  Ningún índice causa significativamente al IBEX35\n")
+  }
+}
+
+cat("\nCOINTEGRACIÓN:\n")
+cat("  Ver resultados del test de Johansen arriba\n")
+cat("  → Indica relaciones de largo plazo entre índices europeos\n")
+
+cat("\nPCA:\n")
+cat(sprintf("  PC1 explica: %.1f%% de varianza\n", var_explained[1] * 100))
+cat(sprintf("  Primeros 3 PCs: %.1f%% de varianza\n", cum_var[3] * 100))
+cat("  → Factor común de mercado domina movimientos\n")
+
+cat("\n", rep("=", 80), "\n")
+
+# Guardar resultados
+saveRDS(list(
+  cor_matrix = cor_matrix,
+  granger_results = granger_df,
+  pca_result = pca_result,
+  sector_returns = sector_returns
+), "output/RData/ibex_multivariate_analysis.rds")
+
+cat("\n✓ Resultados guardados: output/RData/ibex_multivariate_analysis.rds\n")
+```
+
+## Detección de Eventos y Anomalías
+
+### Eventos clave
+
+```{r eventos_clave}
+# Definir eventos clave
+eventos_clave <- tribble(
+  ~fecha, ~evento, ~tipo,
+  # Crisis financieras y económicas
+  "2008-09-15", "Quiebra Lehman Brothers", "Crisis",
+  "2010-05-09", "Rescate Grecia", "Crisis",
+  "2011-08-08", "Rebaja de la calificación crediticia de EE.UU. (S&P)", "Crisis",
+  "2015-06-29", "Cierre de bancos griegos y control de capitales", "Crisis",
+  "2018-02-05", "Flash crash en Wall Street (volatilidad récord VIX)", "Crisis",
+  "2020-03-12", "COVID-19 Pandemia declarada", "Crisis",
+  "2020-03-16", "Desplome COVID (Black Monday)", "Crisis",
+  "2020-11-09", "Anuncio de eficacia vacuna Pfizer-BioNTech", "Crisis",
+  "2021-11-26", "Aparición variante Ómicron", "Crisis",
+  "2023-03-10", "Colapso Silicon Valley Bank (SVB)", "Crisis",
+  "2024-03-15", "Inicio rally tecnológico global post-IA generativa", "Crisis",
+
+  # --- Politica nacional ---
+  "2017-10-01", "Referéndum de independencia de Cataluña", "Política nacional",
+  "2018-06-01", "Moción de censura a Mariano Rajoy (cambio de Gobierno)", "Política nacional",
+  "2023-05-14", "Elecciones municipales y autonómicas España", "Política nacional",
+  "2023-07-23", "Elecciones generales España sin mayoría clara", "Política nacional",
+  
+  # --- Politica europea ---
+  "2012-07-26", "Draghi: 'Whatever it takes'", "Política europea",
+  "2016-06-23", "Brexit (referéndum Reino Unido)", "Política europea",
+  "2024-09-18", "Primer recorte de tipos de interés BCE tras ciclo de subidas", "Política europea",
+  "2012-06-09", "Rescate bancario España (100.000 M€)", "Política europea",
+  "2019-12-12", "Victoria electoral de Boris Johnson (Brexit confirmado)", "Política europea",
+  "2022-03-10", "Máximos históricos en precios de energía en Europa", "Política europea",
+
+  # --- Geopolítica ---
+  "2015-08-11", "Devaluación del yuan por el Banco Popular de China", "Geopolítica",
+  "2018-07-06", "Inicio de la guerra comercial EE.UU.–China", "Geopolítica",
+  "2019-10-11", "Acuerdo parcial 'fase 1' entre EE.UU. y China", "Geopolítica",
+  "2021-09-24", "Crisis Evergrande (sector inmobiliario chino)", "Geopolítica",
+  "2022-10-16", "Reelección de Xi Jinping y consolidación de poder", "Geopolítica",
+  "2023-08-15", "Caída del inmobiliario chino (Country Garden y default local)", "Geopolítica",
+  "2024-01-13", "Elecciones en Taiwán y tensiones con China", "Geopolítica",
+  "2022-02-24", "Invasión Rusia-Ucrania", "Geopolítica",
+  "2021-03-26", "Bloqueo del Canal de Suez (Ever Given)", "Geopolítica",
+
+  # --- Oriente Medio / conflictos ---
+  "2021-05-10", "Escalada de violencia Israel–Gaza (conflicto de 11 días)", "Conflictos",
+  "2023-10-07", "Ataques de Hamás en Israel (inicio guerra Gaza 2023)", "Conflictos",
+  "2023-10-09", "Respuesta militar de Israel en Gaza", "Conflictos",
+  "2024-01-12", "Ataques de EE.UU. y Reino Unido a hutíes en Yemen (Mar Rojo)", "Conflictos",
+  "2024-04-13", "Ataque directo de Irán a Israel con drones y misiles", "Conflictos"
+  
+) %>%
+  mutate(fecha = as.Date(fecha),
+         tipo = as.factor(tipo))
+
+
+print(eventos_clave)
+saveRDS(eventos_clave, "output/RData/eventos_clave.rds")
+
+```
+
+```{r eventos_impacto}
+
+
+# Retornos en fechas de eventos
+eventos_impacto <- eventos_clave %>%
+  left_join(
+    ibex %>%
+      dplyr::select(date, close, log_return_pct),
+    by = c("fecha" = "date")
+  ) %>%
+  dplyr::mutate(
+    returns_5d = map_dbl(fecha, function(f) {
+      mean(ibex$log_return_pct[ibex$date >= f & ibex$date <= f + 5], na.rm = TRUE)
+    })
+  )
+
+
+p1 <- eventos_impacto |>
+ggplot( aes(x = reorder_within(evento, log_return_pct, tipo), y= log_return_pct, fill = tipo )) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ tipo, scales= "free_y", ncol=1) + 
+  scale_x_reordered() + 
+  coord_flip() + 
+  labs(
+    title = "Impacto de eventos en los retornos",
+    x= "Evento",
+    y = "Retorno Logarítmico (%)"
+  ) + 
+  theme_minimal()
+
+p2 <- eventos_impacto |>
+ggplot( aes(x = reorder_within(evento, log_return_pct, tipo), y= returns_5d, fill = tipo )) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ tipo, scales= "free_y", ncol=1) + 
+  scale_x_reordered() + 
+  coord_flip() + 
+  labs(
+    title = "Impacto de eventos en los retornos 5d",
+    x= "Evento",
+    y = "Retorno Logarítmico (%)"
+  ) + 
+  theme_minimal()
+
+print(p1)
+print(p2)
+
+
+
+save_plot("relacion_eventos_retorno", p1, heigh=20)
+save_plot("relacion_eventos_retorno_5d", p2, heigh=20)
+
+print(eventos_impacto %>% dplyr::select(fecha, evento, log_return_pct, returns_5d))
+```
+
+### Outliers y datos atípicos
+
+```{r outliers}
+# Outliers: |retorno| > 3 desviaciones estándar
+sd_returns <- sd(ibex$log_return_pct, na.rm = TRUE)
+mean_returns <- mean(ibex$log_return_pct, na.rm = TRUE)
+threshold <- 3 * sd_returns
+
+outliers <- ibex %>%
+  filter(abs(log_return_pct - mean_returns) > threshold) %>%
+  dplyr::select(date, close, log_return_pct, volatility_20) %>%
+  dplyr::mutate(date = as.Date(date)) |> 
+  arrange(date)
+
+#save outliers
+saveRDS(outliers, "output/RData/outliers.rds")
+
+
+cat(sprintf("\nOutliers detectados (>3σ): %d\n", nrow(outliers)))
+cat("\nTop 10 mayores caídas:\n")
+print(head(outliers %>% arrange(log_return_pct), 10))
+
+cat("\nTop 10 mayores subidas:\n")
+print(head(outliers %>% arrange(desc(log_return_pct)), 10))
+
+
+outliers_events <- outliers |> 
+  left_join(eventos_clave %>%
+      dplyr::select(fecha, evento, tipo),
+    by = c("date" = "fecha"))
+
+
+outliers_events %>%
+mutate(evento = str_wrap(evento, width = 20)) %>%  # ajusta el ancho según el espacio
+ filter(!is.na(evento)) %>%
+ ggplot(aes(x = reorder_within(evento, log_return_pct, tipo), y= log_return_pct, fill = tipo )) +
+  geom_col() +
+  scale_fill_hue(direction = 1) +
+  scale_x_reordered() +  
+  labs(
+    title = "Relacion de valores anómalos con eventos",
+    x= "Evento",
+    y= "Retorno Logarítmico (%)"
+  ) + 
+  guides(x = guide_axis(angle = 90)) +
+  theme_minimal()
+
+```
+
+## Visualizaciones Clave
+
+### Series temporales con eventos marcados
+
+```{r plot_eventos}
+
+plot_eventos <- function(tipo_evento){
+  p_eventos <- ggplot(ibex, aes(x = date, y = close)) +
+    geom_vline(
+    data = eventos_clave |> dplyr::filter(tipo== tipo_evento), aes(xintercept = fecha, color = tipo),
+    linetype = "dashed", size = 1
+  ) +
+  geom_label(
+    data = eventos_clave |> dplyr::filter(tipo== tipo_evento),
+    aes(x = fecha, y = max(ibex$close) * 0.9, label = evento, color = tipo),
+    angle = 90, hjust = 1, size = 2.5, alpha = 0.8
+  ) +
+  geom_line(color = "#2C3E50", size = 0.5) +
+  scale_color_discrete() +
+  labs(title = paste0("IBEX35 - Serie Temporal con Eventos Clave: ",tipo_evento),
+    x = "Fecha", y = "Precio de Cierre", color = "Tipo de Evento"
+  ) +
+  scale_y_continuous(labels = comma) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+  print(p_eventos)
+return(p_eventos)
+}
+
+
+tipos_eventos <- levels(eventos_clave$tipo)
+mapply(plot_eventos, tipos_eventos)
+
+
+```
+
+```{r}
+# Paleta Okabe–Ito (alta legibilidad)
+okabe_ito <- c(
+  "black"  = "#000000",
+  "orange" = "#E69F00",
+  "sky"    = "#56B4E9",
+  "green"  = "#009E73",
+  "verm"   = "#D55E00",
+  "yellow" = "#F0E442",
+  "blue"   = "#0072B2",
+  "purple" = "#CC79A7"
+)
+
+# Asigna colores a niveles de 'tipo' (tantos como necesites)
+tipos <- sort(unique(eventos_clave$tipo))
+cols  <- setNames(okabe_ito[seq_along(tipos)], tipos)
+
+# Rango X compartido
+xlim <- range(ibex$date, na.rm = TRUE)
+
+# --- Panel 1: Timeline superior (sin tapar el precio) ---
+p_timeline <- ggplot(eventos_clave, aes(fecha, y = 0, color = tipo)) +
+  geom_linerange(aes(ymin = 0, ymax = 0.5), linewidth = 0.5, alpha = 0.7) +
+  geom_point(size = 2) +
+  scale_x_date(limits = xlim) +
+  scale_color_manual(values = cols, drop = FALSE) +
+  coord_cartesian(ylim = c(0, 1.2), clip = "off") +
+  theme_void() +
+  theme(
+    legend.position = "none",
+    plot.margin = ggplot2::margin(5, 10, 0, 10)
+  )
+
+# --- Panel 2: Precio inferior (limpio) ---
+p_precio <- ggplot(ibex, aes(date, close)) +
+  geom_line(color = "#2C3E50", linewidth = 0.6) +
+  scale_x_date(limits = xlim,  date_breaks = "2 years", date_labels = "%Y") +
+  labs(title = "IBEX35 timeline",
+       x = "Fecha", y = "Cierre (Puntos)") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.margin = ggplot2::margin(0, 10, 5, 10),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1
+  )
+)
+# --- Leyenda personalizada a la derecha: punto por tipo + descripción del evento ---
+# Una fila por evento: color = tipo, texto = "fecha — evento"
+legend_df <- eventos_clave %>%
+  arrange(tipo, fecha) %>%
+  mutate(
+    etiqueta = paste0(format(fecha, "%Y-%m-%d"), " — ", evento),
+    fila = row_number()  # para ordenar verticalmente
+  )
+
+
+
+p_leyenda <- ggplot(legend_df, aes(x = 0, y = -fila, color = tipo)) +
+  geom_point(size = 3) +
+  geom_text(aes(label = etiqueta), hjust = 0, nudge_x = 0.05, size = 1.8) +
+  scale_color_manual(values = cols, drop = FALSE) +
+  coord_cartesian(clip = "off") +
+  theme_void() +
+  theme(
+    legend.position = "none",
+    plot.margin = ggplot2::margin(10, 10, 10, 0)
+  ) +
+  xlim(0, 1)  # deja espacio para el texto
+
+# --- Composición final: (timeline / precio) | leyenda ---
+final_plot <- ((p_timeline / p_precio) + plot_layout(heights = c(1, 5))) | p_leyenda
+final_plot + plot_layout(widths = c(3.2, 1))
+
+save_plot("Precios y eventos", final_plot)
+```
+
+### Volatilidad rolling
+
+```{r}
+# 2.5.4 VOLATILIDAD ROLLING
+
+# Múltiples ventanas de volatilidad
+ibex <- ibex %>%
+  mutate(
+    vol_10 = zoo::rollapply(log_return_pct, width = 10, FUN = sd, fill = NA, align = "right"),
+    vol_20 = zoo::rollapply(log_return_pct, width = 20, FUN = sd, fill = NA, align = "right"),
+    vol_60 = zoo::rollapply(log_return_pct, width = 60, FUN = sd, fill = NA, align = "right")
+  )
+
+vol_long <- ibex %>%
+  dplyr::select(date, vol_10, vol_20, vol_60) %>%
+  pivot_longer(cols = starts_with("vol"), names_to = "ventana", values_to = "volatilidad") %>%
+  mutate(ventana = factor(ventana,
+    levels = c("vol_10", "vol_20", "vol_60"),
+    labels = c("10 días", "20 días", "60 días")
+  ))
+
+p_volatilidad <- ggplot(vol_long, aes(x = date, y = volatilidad, color = ventana)) +
+  geom_line(alpha = 0.7) +
+  scale_color_manual(values = c("#3498DB", "#E74C3C", "#27AE60")) +
+    facet_wrap(~ventana, ncol=1, scales= "free_y") +
+    guides(color = "none") +  # Elimina la primera leyenda
+  # Nueva escala de color para los eventos
+  ggnewscale::new_scale_color() +
+  geom_vline(
+    data = eventos_clave,
+    aes(xintercept = fecha, color = tipo),
+    linetype = "dashed", alpha = 0.5  ) +
+  scale_color_brewer(palette = "Set1", name = "Tipo de evento") +
+  labs(
+    title = "IBEX35 - Volatilidad Rolling",
+    subtitle = "Líneas rojas: Eventos clave",
+    x = "Fecha", y = "Volatilidad (%)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p_volatilidad)
+save_plot("volatilidad_eventos",p_volatilidad)
+```
+
+```{r save_rds}
+# Guardar workspace final
+saveRDS(ibex, "output/RData/ibex_eda_complete.rds")
+saveRDS(eventos_clave, "output/RData/eventos_clave.rds")
+saveRDS(outliers, "output/RData/outliers.rds")
+
+```
+
+## Features de Análisis de Sentimientos
+
+Los datos deacargados de GDELT 1.0 GKG (Global Knowledge Graph) contienen múltiples variables relacionadas con el análisis de sentimientos en noticias financieras.
+A continuación, se describen las principales features que se pueden derivar para su uso en modelos predictivos.
+En GDELT 1.0, las variables relevantes para el análisis de sentimientos incluyen: - DATE: Fecha del evento (YYYYMMDD) - NUMARTS: Número de artículos que mencionan el evento (proxy de importancia) - COUNTS: Campo de GKG, no de Event Database - THEMES: Lista de temas identificados (campo de GKG) - LOCATIONS: Ubicaciones geográficas extraídas con coordenadas - PERSONS: Nombres de personas identificadas en el texto - ORGANIZATIONS: Empresas, ONGs, IGOs mencionadas - TONE: Métrica de sentimiento (ver detalles abajo) - CAMEOEVENTIDS: IDs únicos de eventos CAMEO relacionados - SOURCES: Dominios/fuentes que publicaron el evento - SOURCEURLS: URLs completas de los artículos fuente
+
+**TONE** Campo adecuado para análisis de sentimientos.
+Por qué TONE es adecuado: TONE es el promedio del tono de todos los documentos que mencionan un evento, rangeando de -100 (extremadamente negativo) a +100 (extremadamente positivo), con valores comunes entre -10 y +10.
+Se calcula como Positive Score menos Negative Score.
+Los 6 componentes de TONE (comma-delimited):
+
+-   Tone: Score general (-100 a +100) = Positive Score - Negative Score
+-   Positive Score: % de palabras con connotación positiva (0 a +100)
+-   Negative Score: % de palabras con connotación negativa (0 a +100)
+-   Polarity: % de palabras con carga emocional (independiente de si es positiva/negativa)
+-   Activity Reference Density: % de palabras activas (proxy de "actividad" del texto)
+-   Self/Group Reference Density: % de pronombres (referencias personales/grupales)
+
+### Filtrado de noticias relevantes
+
+PARÁMETROS DE CONFIGURACIÓN: RELEVANCIA IBEX35 (num_criterios_ibex35 \>= 2): a) cumple_THEMES: regexp en THEMES (ECON_STOCKMARKET\|WB\_.*STOCK\|SPAIN\|SPANISH\|IBEX\| MADRID.*EXCHANGE\|BME)
+
+b)  cumple_ORGANIZATIONS: regexp en ORGANIZATIONS (santander\|bbva\|telefonica\|iberdrola\|inditex\|repsol\| caixabank\|endesa\|naturgy\|ferrovial\|amadeus\|aena\|grifols\| mapfre\|cellnex\|colonial\|sabadell\|enagas\|acerinox\|merlin\| logista\|bankinter\|indra\|fluidra\|melia\|viscofan\|solaria\| ibex\|bolsa.*madrid\|mercado.*(español\|espanol)\|bme\|latibex)
+
+c)  cumple_SOURCES: regexp en SOURCEURLS (.es) o SOURCES (elmundo\|elpais\|abc\|lavanguardia\|eleconomista\|expansion\| cincodias\|vozpopuli\|elconfidencial\|publico\|eldiario\| 20minutos\|rtve\|efe\|europa.\*press)
+
+```{r}
+#| eval: false
+#| include: false
+
+# Filtrar parquet previamente consolidado
+# Filtrar noticias relacionadas con España/IBEX35
+#input_parquet <- "data/gdelt_all_consolidated.parquet"
+#output_file <- "data/gdelt_filtered/gdelt_ibex35_filtered_low_noise_tracking.parquet"
+#log_file <- file.path("data", paste0("filter_log_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt"))
+#source("code/R/13e_web_scraping_filter_geo_parquet_low_noise_w_tracking.R")
+
+
+
+# Aplicar filtros a cada batch 
+# Filtrar noticias relacionadas con España/IBEX35
+input_dir <- "/mnt/NTFS/gdelt_consolidated/gdelt_parquet"
+output_dir <- "/mnt/NTFS/gdelt_consolidated/gdelt_filtered"
+filter_script <- "code/R/113.filter_script.R"
+
+main_log <- file.path("output/log", paste0("filter_gdelt_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt"))
+
+source("code/R/12.filter_parquet_files.R")
+#gdelt_filter <- arrow::read_parquet(output_file)
+
+
+```
+
+Una vez filtrados, procederemos a la consolidación de los datos filtrados.
+
+```{r}
+#| eval: false
+#| include: false
+# Configuración
+input_dir <- "/mnt/NTFS/gdelt_consolidated/gdelt_filtered"
+output_file <- "data/gdelt_filtered/gdelt_filtered_consolidated.parquet"
+main_log <- file.path("output/log", paste0("consolidated_gdelt_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt"))
+
+source("code/R/14.consolidate_filtered_batches.R")
+```
+
+El archivo consolidado `gdelt_filtered_consolidated.parquet` contiene todos los registros descargados de GDELT en el período especificado, listo para su posterior análisis.
+
+### Scores de sentimiento diario (promedio/agregación)
+
+VARIABLES DE SENTIMIENTO: ────────────────────────────────────────────────── mean_tone_score Sentimiento promedio (-100 a +100) Métrica principal.
+Negativo = pesimismo
+
+median_tone_score Mediana del sentimiento Más robusta a outliers que la media
+
+sd_tone_score Volatilidad/dispersión de opiniones Alta SD = noticias contradictorias ese día Útil para medir incertidumbre
+
+min/max_tone_score Extremos del día Detecta noticias muy positivas/negativas
+
+mean_positive % promedio palabras positivas mean_negative % promedio palabras negativas Útiles para entender qué domina el tono
+
+mean_polarity Intensidad emocional promedio (positive% + negative%) Alta polarity = lenguaje cargado Baja polarity = neutral/técnico
+
+mean_activity % verbos de acción Mayor actividad = eventos dinámicos
+
+mean_selfref % palabras autorreferenciales Menos útil para análisis agregado
+
+VARIABLES DE CONTEXTO: ────────────────────────────────────────────────── total_records Nº eventos GDELT ese día total_articles Nº artículos totales Proxy de atención mediática/cobertura
+
+Interpretación práctica:
+
+**mean_tone** (más importante): - **-5 a -2:** Día muy negativo para IBEX35 - **-2 a 0:** Día ligeramente negativo - **0 a 2:** Día ligeramente positivo - **2 a 5:** Día muy positivo
+
+**mean_polarity** (intensidad): - **\< 5:** Día tranquilo, poca carga emocional - **5-10:** Intensidad normal - **\> 10:** Día con mucha carga emocional (crisis, euforia)
+
+**sd_tone** (volatilidad): - **Baja (\<3):** Consenso en el sentimiento - **Alta (\>5):** Noticias muy mixtas (algunas muy positivas, otras muy negativas)
+
+```{r}
+#| eval: true
+#| include: true
+input_parquet <- "data/gdelt_filtered_consolidated.parquet"
+output_dir <- "output/analysis_ibex35"
+log_file <- file.path("output/log", paste0("sentiment_log_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt"))
+
+
+
+source("code/R/15.sentiment_score.R")
+```
+
+### Conteo de noticias positivas/negativas
+
+```{r}
+#| eval: true
+#| include: true
+input_parquet <- "data/gdelt_filtered_consolidated.parquet"
+output_dir <- "output/analysis_ibex35"
+log_file <- file.path("output/log", paste0("sentiment_count_log_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt"))
+#Análisis de conteo de noticias positivas/negativas
+source("code/R/16.analysis_sentiment_counts_ibex35.R")
+```
+
+### Intensidad de cobertura mediática
+
+```{r}
+#| eval: true
+#| include: true
+#Análisis de intensidad de cobertura mediática. Analisis del tono, polaridad y volatilidad
+source("code/R/17.analysis_sentiment_intensity_ibex35.R")
+```
+
+### Lags de sentimiento (efecto retardado)
+
+```{r}
+#| eval: true
+#| include: true
+log_file <- file.path("output/log", paste0("sentiment_lags_log_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt"))
+#Análisis de lags de sentimiento
+source("code/R/18.Lags_sentimientos.R")
+```
+
+## SessionInfo()
+
+```{r}
+sessionInfo()
+```

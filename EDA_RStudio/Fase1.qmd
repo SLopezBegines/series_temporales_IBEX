@@ -1,0 +1,229 @@
+---
+title: "Predicción de valores y tendencias de cierre del IBEX35 mediante *machine learning* y *webscraping*"
+subtitle: "Fase 1: Descarga y consolidadción de datos"
+author: "Santiago López Begines"
+date: "`r Sys.Date()`"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    theme: cosmo
+    embed-resources: true
+    fig-width: 8
+    fig-height: 6
+    df-print: paged
+  pdf:
+    df-print: kable
+    documentclass: article
+    latex_engine: xelatex
+    fontsize: 11pt
+    mainfont: Liberation Sans
+    linestretch: 1
+    geometry:
+      - top=2.5cm
+      - bottom=2.5cm
+      - left=3cm
+      - right=3cm
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    colorlinks: true
+    indent: true
+    fig-pos: 'H'
+    keep-tex: true
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+  freeze: auto
+editor: visual
+---
+
+# Configuración y recopilación de datos
+
+## Configuración del entorno
+
+```{r cargar_librerias}
+#| include: false
+# Cargar librerías necesarias
+
+#chmod +x bootstrap_system_deps.sh
+#./bootstrap_system_deps.sh
+source("code/R/00.libraries.R")
+source("code/R/00.python_libraries.R")
+
+```
+
+```{r directorios y variables globales}
+#| include: false
+#Global variables
+output_path <- "output"
+image_number <- 1
+table_number <- 1
+set.seed(123) # For reproducibility
+# Create output directory if it doesn't exist
+dir.create("code", recursive = TRUE,showWarnings = FALSE)
+dir.create("data", recursive = TRUE,showWarnings = FALSE)
+# Source general functions
+source("code/R/01.general_functions.R")
+create_directories(output_path)
+```
+
+### Load Functions
+
+```{r load_fucntions}
+source("code/R/02.EDA_functions.R")
+```
+
+## Recopilación de datos
+
+### Descarga de datos financieros
+
+Stock e indices de empresas del IBEX35 a descargar.
+Usar claves del paquete 'yfinance'
+
+```{python download_index}
+#| include: false
+# Importar script como módulo
+import sys
+sys.path.append("code/py")
+from stocks_downloader import download_ibex
+from stocks_list import stocks_to_download, ibex_selected_companies
+#import importlib
+#importlib.reload(stocks_downloader)
+
+# Diccionario para guardar resultados
+results_indexes = {}
+
+# Bucle general
+for stock in stocks_to_download:
+    ticker = stock["ticker"]
+    name = stock["name"]
+    print(f"Descargando {name} ({ticker})...")
+
+    df = stocks_downloader.download_ibex(ticker, "20004-01-01", "2025-10-16", False)
+
+    # Guardar en el diccionario, clave = nombre del índice
+    results_indexes[name] = df
+```
+
+```{python download_index_companies}
+# Diccionario para guardar resultados
+results_companies = {}
+
+# Bucle general
+for stock in ibex_selected_companies:
+    ticker = stock["ticker"]
+    name = stock["name"]
+    sector = stock["sector"]
+    print(f"Descargando {name} ({ticker})...")
+
+    df = stocks_downloader.download_ibex(ticker, "2004-01-01", "2025-10-16", False)
+    df["ticker"] = ticker
+    df["name"] = name
+    df["sector"] = sector
+    # Guardar en el diccionario, clave = nombre del índice
+    results_companies[name] = df    
+```
+
+```{r transfer_py_to_r}
+source("code/R/03.transfer_py_to_r.R")
+```
+
+```{r load parquet data}
+# Load data
+all_stocks_df <- read_parquet(paste0(output_path,"/tables/all_indices.parquet"))
+all_companies_df <- read_parquet(paste0(output_path,"/tables/ibex35_companies_all.parquet"))
+```
+
+## Web Scraping - Prensa Económica
+
+### Fuentes seleccionadas
+
+Según relevancia y facilidad de scraping:
+
+-   Prensa española:
+
+| Fuente | Url base | Feed RSS | Idioma |
+|------------------|------------------|------------------|------------------|
+| **Cinco Días** | cincodias.elpais.com | https://feeds.elpais.com/mrss-s/pages/ep/site/cincodias.elpais.com/portada | ES |
+| **Expansión** | expansion.com | https://e00-expansion.uecdn.es/rss/portada.xml | ES |
+| **El Economista** | eleconomista.es | https://www.eleconomista.es/rss/rss-titulares.xml | ES |
+| **El Confidencial - Mercados** | elconfidencial.com/mercados | https://rss.elconfidencial.com/mercados/ | ES |
+| **La Vanguardia - Economía** | lavanguardia.com/economia | https://www.lavanguardia.com/economia/rss | ES |
+
+: Fuentes españolas. Cobertura directa del IBEX35
+
+-   Prensa Europea
+
+| Fuente | Url base | Feed RSS | Idioma |
+|------------------|------------------|------------------|------------------|
+| **Reuters (Europe)** | reuters.com/markets/europe | https://www.reuters.com/markets/europe | EN |
+| **Handelsblatt** (Alemania) | handelsblatt.com | https://www.handelsblatt.com/contentexport/feed/top-themen | DE |
+| **Les Échos** (Francia) | lesechos.fr | https://www.lesechos.fr/rss.xml | FR |
+| **ECB Press Releases** | ecb.europa.eu/press | https://www.ecb.europa.eu/rss/press.html | EN |
+
+: Fuentes europeas. Alta influencia en el IBEX35 debido a la integración europea.
+
+-   Prensa Americana
+
+| Fuente | Url base | Feed RSS | Idioma |
+|------------------|------------------|------------------|------------------|
+| **CNBC** | cnbc.com | https://www.cnbc.com/id/100003114/device/rss/rss.html | EN |
+| **MarketWatch** | marketwatch.com | http://feeds.marketwatch.com/marketwatch/topstories/ | EN |
+| **Fed Press Releases** | federalreserve.gov/newsevents | https://www.federalreserve.gov/feeds/press_all.xml | EN |
+| **Reuters US** | reuters.com | https://www.reuters.com/markets/us | EN |
+
+: Mercados estadounidenses (S&P500, Reserva Federal) pueden impactar directamenre en los valores del IBEX35 debido a su importancia mundial.
+
+Explicar problemas con RSS y webscrapping (limitación temporal, limitación de accesos gratuitos...) Uso de GDELT
+
+### Descarga y almacenamiento de datos textuales
+
+Uso de GDELT como fuente alternativa para superar limitaciones de acceso y cobertura temporal.
+
+El procedimiento será: - Descarga de CSV.ZIP (Tamaño aproximado: 145Gb ) Directorio: `gdelt_raw`.
+Script: `ccode/R/11_web_scraping_download_gdelt_parallel.R`. Tiempo aproximado: 2-4h.
+- Conversión a formator parquet (Tamaño aproximado: 190Gb) Directorio: `gdelt_parquet`.
+Script: `code/sh/step1_zip_to_parquet.sh`.
+Tiempo aproximado: 4-6h.
+- Filtrado (duckdb) (Tamaño aproximado: 66Mb) Directorio: `gdelt_filtered`.
+Script: `code/R/filter_parquet_files.R`. Tiempo aproximado: 1-2h - Consolidación (Tamaño aproximado: 30Mb) Archivo: `gdelt_filtered_consolidated.parquet`.
+Script: `code/R/consolidate_filtered_batches.R`. Tiempo aproximado: \<1min
+
+```{r gdelt_download}
+#| eval: false
+#| include: false
+start_date <- as.Date("2014-01-01")
+end_date <- as.Date("2025-10-16")
+output_dir <- "data/gdelt_raw"
+
+log_file <- file.path("data", paste0("download_log_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt"))
+source("code/R/11.web_scraping_download_gdelt_parallel.R")
+
+
+```
+
+### Conversión a parquet
+
+Debido a la velocidad de procesamiento, usaremos el formato parquet, mucho más optimizado que CSV para archivos grandes.
+
+Ejecutar `code/sh/step1_zip_to_parquet.sh` desde la terminal con `bash step1_zip_to_parquet.sh` Esto convertirá los `*.zip` a `*.parquet`, formato más optimizado para grandes conjuntos de datos
+
+```         
+#Editar las siguientes variables
+INPUT_DIR="/mnt/NTFS/gdelt_consolidated/gdelt_raw"
+OUTPUT_DIR="/mnt/NTFS/gdelt_consolidated/gdelt_parquet"
+LOG_FILE="step1_zip_to_parquet.log"
+NUM_CORES=2  # 2 cores para 16GB RAM
+```
+
+## SessionInfo()
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,448 @@
+---
+title: "Predicción de valores y tendencias de cierre del IBEX35 mediante *machine learning* y *webscraping*"
+subtitle: "Fase 4: Unión de datos financieros con datos de GDELT"
+author: "Santiago López Begines"
+date: "`r Sys.Date()`"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    theme: cosmo
+    embed-resources: true
+    fig-width: 8
+    fig-height: 6
+    df-print: paged
+    code-overflow: wrap
+  pdf:
+    df-print: kable
+    documentclass: article
+    latex_engine: xelatex
+    fontsize: 11pt
+    mainfont: Liberation Sans
+    linestretch: 1
+    geometry:
+      - top=2.5cm
+      - bottom=2.5cm
+      - left=3cm
+      - right=3cm
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    colorlinks: true
+    indent: true
+    fig-pos: 'H'
+    keep-tex: true
+    code-overflow: wrap
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+  freeze: auto
+editor: visual
+---
+
+```{r entorno}
+#| include: false
+rm(list=ls())
+gc()
+source("code/R/00.libraries.R")
+
+#Global variables
+output_path <- "output"
+image_number <- 70
+set.seed(123) # For reproducibility
+# Source general functions
+source("code/R/01.general_functions.R")
+create_directories(output_path)
+source("code/R/02.EDA_functions.R")
+
+# Iniciaar log_file
+log_file <- file.path("output/log", paste0("fase_4_log_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt"))
+
+log_cat("== Iniciando archivo Log Fase 3 ==\n")
+log_cat(paste0("== Fecha: ", format(Sys.time(), "%Y%m%d_%H%M%S"), " ==\n\n"))
+```
+
+# Cargar datos
+
+```{r}
+#Datos financieros
+train_final <- readRDS(file = paste0(output_path,"/RData/train_financiero.rds"))
+test_final <-  readRDS(file = paste0(output_path,"/RData/test_financiero.rds"))
+#Datos de sentimientos de GDELT
+daily_sentiment_train_final <- readRDS(file = paste0(output_path,"/RData/sentiment_train_clean.rds"))
+daily_sentiment_test_final <- readRDS(file = paste0(output_path,"/RData/sentiment_test_clean.rds"))
+
+```
+
+### Variables dummy
+
+Sólo tenemos una variable categórica, `vix_regime`, que la convertiremos a dummy con `fastDummies::dummy_cols()`
+
+```{r}
+# Para train
+train_final <- fastDummies::dummy_cols(train_final, 
+                          select_columns = "vix_regime",
+                          remove_first_dummy = FALSE,
+                          remove_selected_columns = TRUE)
+
+# Para test
+test_final <- fastDummies::dummy_cols(test_final, 
+                         select_columns = "vix_regime",
+                         remove_first_dummy = FALSE,
+                         remove_selected_columns = TRUE)
+
+
+
+# Verifica que ambos tengan las mismas columnas
+setdiff(names(train_final), names(test_final))  # Debe estar vacío
+setdiff(names(test_final), names(train_final))  # Debe estar vacío
+
+
+# En caso que en test no aparezcan todas las clases, train y test tendrán diferente número de columnas
+# Asegura que test tenga las mismas columnas dummy que train
+train_cols <- grep("^vix_regime", names(train_final), value = TRUE)
+
+for(col in train_cols) {
+  if(!col %in% names(test_final)) {
+    test_final[[col]] <- 0  # Añade columna faltante con ceros
+  }
+}
+
+# Reordena columnas de test para que coincidan con train
+test_final <- test_final[, names(train_final)]
+
+str(train_final)
+str(test_final)
+```
+
+### Filtrar datos por duración de la serie
+
+```{r}
+
+train_final <- train_final |> 
+  dplyr::filter(date>"2014-01-01")
+```
+
+# Unión datos financieros con datos de GDELT.
+
+## Unión de datos
+
+```{r}
+# Unir datos sentimentales limpios con datos financieros limpios
+
+
+
+# Asumiendo que ya tienes train_step2 y test_step2 limpios
+train_with_sentiment <- train_final %>%
+  left_join(daily_sentiment_train_final, by = "date")
+
+test_with_sentiment <- test_final %>%
+  left_join(daily_sentiment_test_final, by = "date")
+
+log_cat("\n=== DATOS UNIDOS ===\n")
+log_cat("Train:", nrow(train_with_sentiment), "obs x", 
+    ncol(train_with_sentiment), "vars\n")
+log_cat("Test:", nrow(test_with_sentiment), "obs x", 
+    ncol(test_with_sentiment), "vars\n")
+
+log_cat("\nNAs después del join:\n")
+# Conteo de NAs por variable (top 10)
+na_counts <- colSums(is.na(train_with_sentiment))
+top_na_train <- sort(na_counts[na_counts > 0], decreasing = TRUE)
+log_cat("\nTrain:\n")
+log_cat(top_na_train)
+
+na_counts <- colSums(is.na(test_with_sentiment))
+top_na_test <- sort(na_counts[na_counts > 0], decreasing = TRUE)
+log_cat("\nTest:\n\n")
+log_cat(top_na_test)
+
+
+```
+
+Algunos NAs pueden aparecer en las variables sentimentales debido a fechas sin noticias.
+Vamos a imputar los NAs considerando que el sentimiento persiste igual al día anterior (forward fill).
+
+#### Limpieza de datos
+
+```{r}
+source("code/R/19.cleaning_sentiment.R")
+# OPCIÓN 1: Forward Fill (RECOMENDADO para sentiment)
+# Asume que el sentiment del último día persiste
+sentiment_imputed <- impute_sentiment_nas(
+  train_df = train_with_sentiment,
+  test_df = test_with_sentiment,
+  method = "forward_fill",
+  verbose = TRUE
+)
+
+# Extraer datasets
+train_final_with_sentiment <- sentiment_imputed$train
+test_final_with_sentiment <- sentiment_imputed$test
+
+# Verificación completa de NAs en todo el dataset
+log_cat("\n=== VERIFICACIÓN COMPLETA ===\n")
+log_cat("Train - NAs totales:", sum(is.na(train_final_with_sentiment)), "\n")
+log_cat("Test - NAs totales:", sum(is.na(test_final_with_sentiment)), "\n")
+
+# NAs solo en targets (esperado)
+log_cat("\nNAs en targets (esperado):\n")
+log_cat("returns_next (test):", sum(is.na(train_final_with_sentiment$returns_next)), "\n")
+log_cat("returns_next_5 (test):", sum(is.na(test_final_with_sentiment$returns_next_5)), "\n")
+log_cat("returns_next_10 (test):", sum(is.na(test_final_with_sentiment$returns_next_10)), "\n")
+log_cat("returns_next_20 (test):", sum(is.na(test_final_with_sentiment$returns_next_20)), "\n")
+
+# Guardar datasets finales
+saveRDS(train_final_with_sentiment, "output/RData/train_final_with_sentiment.rds")
+saveRDS(test_final_with_sentiment, "output/RData/test_final_with_sentiment.rds")
+```
+
+### Evaluar importancia de features con Random Forest
+
+```{r}
+source("code/R/06.cleaning_features.R")
+
+#Seleccionar hasta 90% importancia acumulada
+
+rf_results <- rank_features_by_importance(
+  train_df = train_final_with_sentiment,
+  test_df = test_final_with_sentiment,
+  target_var = "returns_next",
+  ntree = 500,
+  importance_threshold = 90,
+  save_plots = TRUE,
+  save_files = TRUE,
+  output_dir = output_path,
+  plot_formats = c("tiff", "pdf"),  # Guardar en ambos formatos
+  plot_width = 20,
+  plot_height = 16,
+  verbose = TRUE
+)
+# Tabla de importancia
+importance_table <- rf_results$importance
+
+# Acceder a modelo RF directamente
+predictions <- predict(rf_results$rf_model, newdata = test_final_with_sentiment)
+
+
+# Top 10 variables
+top_20 <- head(rf_results$variables_selected, 20)
+log_cat("\n=== TOP 20 VARIABLES ===\n")
+log_cat(top_20)
+```
+
+```{r}
+# Comparar diferentes targets
+rf_next1 <- rank_features_by_importance(
+  train_df = train_final_with_sentiment,
+  target_var = "returns_next",
+  ntree = 500,
+  verbose = FALSE
+)
+
+rf_next5 <- rank_features_by_importance(
+  train_df = train_final_with_sentiment,
+  target_var = "returns_next_5",
+  ntree = 500,
+  verbose = FALSE
+)
+
+log_cat("\nComparación de R²:\n")
+log_cat("returns_next:", round(rf_next1$model_rsquared, 4), "\n")
+log_cat("returns_next_5:", round(rf_next5$model_rsquared, 4), "\n")
+```
+
+```{r}
+#SaveRDS 
+saveRDS(train_final, file = paste0(output_path,"/RData/train_final_financiero.rds"))
+saveRDS(test_final, file = paste0(output_path,"/RData/test_final_financiero.rds"))
+
+
+```
+
+## Definir variables target binarias
+
+```{r}
+#Datasets finales:
+# Sólo variables financieras
+# Comparar distribución de targets
+summary(train_final$returns_next)
+summary(train_final$returns_next_5)
+summary(train_final$returns_next_10)
+summary(train_final$returns_next_20)
+
+summary(test_final$returns_next)
+summary(test_final$returns_next_5)
+summary(test_final$returns_next_10)
+summary(test_final$returns_next_20)
+
+
+
+# Definir variables target binarias
+# Para REGRESIÓN: returns_next o returns_next_5
+# Para CLASIFICACIÓN: variable binaria
+train_final <- train_final %>%
+  mutate(
+    direction_next = ifelse(returns_next > 0, 1, 0),      # 1=sube, 0=baja
+    direction_next_5 = ifelse(returns_next_5 > 0, 1, 0),
+    direction_next_10 = ifelse(returns_next_10 > 0, 1, 0),
+    direction_next_20 = ifelse(returns_next_20 > 0, 1, 0)
+  )
+test_final <- test_final %>%
+  mutate(
+    direction_next = ifelse(returns_next > 0, 1, 0),
+    direction_next_5 = ifelse(returns_next_5 > 0, 1, 0),
+    direction_next_10 = ifelse(returns_next_10 > 0, 1, 0),
+    direction_next_20 = ifelse(returns_next_20 > 0, 1, 0)
+  )
+
+# Verificar distribución de clases
+log_cat("\n=== DISTRIBUCIÓN DE CLASES ===\n")
+log_cat("Train - direction_next:\n")
+log_cat(table(train_final$direction_next))
+log_cat("\nTrain - direction_next_5:\n")
+log_cat(table(train_final$direction_next_5))
+log_cat("\nTrain - direction_next_10:\n")
+log_cat(table(train_final$direction_next_10))
+log_cat("\nTrain - direction_next_20:\n")
+log_cat(table(train_final$direction_next_20))
+
+log_cat("\nTest - direction_next:\n")
+log_cat(table(test_final$direction_next))
+log_cat("\nTest - direction_next_5:\n")
+log_cat(table(test_final$direction_next_5))
+log_cat("\nTest - direction_next_10:\n")
+log_cat(table(test_final$direction_next_10))
+log_cat("\nTest - direction_next_20:\n")
+log_cat(table(test_final$direction_next_20))
+
+
+
+# Save datasets
+saveRDS(train_final, "output/RData/train_final_financiero.rds")
+saveRDS(test_final, "output/RData/test_final_financiero.rds")
+
+# Variables financieras más sentimientos
+
+# Comparar distribución de targets
+summary(train_final_with_sentiment$returns_next)
+summary(train_final_with_sentiment$returns_next_5)
+summary(train_final_with_sentiment$returns_next_10)
+summary(train_final_with_sentiment$returns_next_20)
+
+
+summary(test_final_with_sentiment$returns_next)
+summary(test_final_with_sentiment$returns_next_5)
+summary(test_final_with_sentiment$returns_next_10)
+summary(test_final_with_sentiment$returns_next_20)
+
+
+# Definir variables target binarias
+# Para REGRESIÓN: returns_next o returns_next_5
+# Para CLASIFICACIÓN: variable binaria
+train_final_with_sentiment <- train_final_with_sentiment %>%
+  mutate(
+    direction_next = ifelse(returns_next > 0, 1, 0),      # 1=sube, 0=baja
+    direction_next_5 = ifelse(returns_next_5 > 0, 1, 0),
+    direction_next_10 = ifelse(returns_next_10 > 0, 1, 0),
+    direction_next_20 = ifelse(returns_next_20 > 0, 1, 0)
+    )
+test_final_with_sentiment <- test_final_with_sentiment %>%
+  mutate(
+    direction_next = ifelse(returns_next > 0, 1, 0),
+    direction_next_5 = ifelse(returns_next_5 > 0, 1, 0),
+    direction_next_10 = ifelse(returns_next_10 > 0, 1, 0),
+    direction_next_20 = ifelse(returns_next_20 > 0, 1, 0)
+    )
+
+# Verificar distribución de clases
+log_cat("\n=== DISTRIBUCIÓN DE CLASES ===\n")
+log_cat("Train - direction_next:\n")
+log_cat(table(train_final_with_sentiment$direction_next))
+log_cat("\nTrain - direction_next_5:\n")
+log_cat(table(train_final_with_sentiment$direction_next_5))
+log_cat("\nTrain - direction_next_10:\n")
+log_cat(table(train_final_with_sentiment$direction_next_10))
+log_cat("\nTrain - direction_next_20:\n")
+log_cat(table(train_final_with_sentiment$direction_next_20))
+
+
+
+log_cat("\nTest - direction_next:\n")
+log_cat(table(test_final_with_sentiment$direction_next))
+log_cat("\nTest - direction_next_5:\n")
+log_cat(table(test_final_with_sentiment$direction_next_5))
+log_cat("\nTest - direction_next_10:\n")
+log_cat(table(test_final_with_sentiment$direction_next_10))
+log_cat("\nTest - direction_next_20:\n")
+log_cat(table(test_final_with_sentiment$direction_next_20))
+
+
+
+# Guardar datasets finales
+saveRDS(train_final_with_sentiment, "output/RData/train_final_with_sentiment.rds")
+saveRDS(test_final_with_sentiment, "output/RData/test_final_with_sentiment.rds")
+
+
+
+```
+
+## Feature Scaling y Transformaciones
+
+```{r}
+source("code/R/20.feature_scaling.R")
+
+
+# Para datasets SOLO financieros
+scaled_financial <- create_scaled_versions(
+  train_df = train_final,
+  test_df = test_final,
+  scale_method = "center_scale",  # Z-score estándar
+  save_scaler = TRUE,
+  output_dir = "output/RData/ML_financial"
+)
+
+# Para datasets CON sentiment
+scaled_sentiment <- create_scaled_versions(
+  train_df = train_final_with_sentiment,
+  test_df = test_final_with_sentiment,
+  scale_method = "center_scale",
+  save_scaler = TRUE,
+  output_dir = "output/RData/ML_sentiment"
+)
+```
+
+```{r load_datasets}
+# Cargar datasets
+
+train_financial_unscaled <- readRDS(file.path(output_path,"RData","ML_financial","train_unscaled.rds"))
+test_financial_unscaled <- readRDS(file.path(output_path,"RData","ML_financial","test_unscaled.rds"))
+
+train_financial_scaled <- readRDS(file.path(output_path,"RData","ML_financial","train_scaled_zscore.rds"))
+test_financial_scaled <- readRDS(file.path(output_path,"RData","ML_financial","test_scaled_zscore.rds"))
+
+
+train_sentiment_unscaled <- readRDS(file.path(output_path,"RData","ML_sentiment","train_unscaled.rds"))
+test_sentiment_unscaled <- readRDS(file.path(output_path,"RData","ML_sentiment","test_unscaled.rds"))
+
+train_sentiment_scaled <- readRDS(file.path(output_path,"RData","ML_sentiment","train_scaled_zscore.rds"))
+test_sentiment_scaled <- readRDS(file.path(output_path,"RData","ML_sentiment","test_scaled_zscore.rds"))
+
+
+colnames(train_financial_unscaled)
+colnames(train_sentiment_unscaled)
+
+
+
+```
+
+## SessionInfo()
+
+```{r}
+sessionInfo()
+```
