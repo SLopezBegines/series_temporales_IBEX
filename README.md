@@ -19,29 +19,28 @@ End-to-end pipeline for predicting the **daily directional movement** (up/down) 
 ---
 
 ## Pipeline Architecture
-
 ```mermaid
-flowchart LR
+flowchart TD
     subgraph Data ["📥 Data Collection"]
-        A1["IBEX35 + components\nYahoo Finance\n2004–2024"]
-        A2["External markets\nS&P500, EuroStoxx\nOil, Gold, EUR/USD"]
-        A3["GDELT news\n>2,000 ZIP files\n~150 GB"]
+        A1["IBEX35 + components · Yahoo Finance · 2004–2024"]
+        A2["External markets · S&P500 · EuroStoxx · Oil · Gold"]
+        A3["GDELT news · >2,000 ZIP files · ~150 GB"]
     end
 
-    subgraph EDA ["🔬 EDA & Feature Engineering (R)"]
-        B1["Fase 1–2\nTechnical indicators\nRSI, MACD, Bollinger\nMoving averages, volatility"]
-        B2["Fase 3–4\nGDELT download\nParquet conversion\nSentiment scoring"]
-        B3["Fase 5\nFeature integration\n~50 features selected"]
+    subgraph EDA ["🔬 EDA & Features · R · Quarto"]
+        B1["Fase 1–2 · RSI · MACD · Bollinger · Volatility · MAs"]
+        B2["Fase 3–4 · GDELT download · Parquet · Sentiment scoring"]
+        B3["Fase 5 · Feature integration · ~50 features · Scaling"]
     end
 
-    subgraph ML ["🤖 ML Pipeline (Python / Colab)"]
-        C1["Baseline models\nARIMA · Prophet\nNaïve"]
-        C2["Traditional ML\nXGBoost · LightGBM\nRandom Forest"]
-        C3["Deep Learning\nLSTM · GRU · MLP"]
+    subgraph ML ["🤖 ML Pipeline · Python · Colab"]
+        C1["Baselines · ARIMA · Prophet · Naïve"]
+        C2["Gradient boosting · LightGBM · XGBoost · RF"]
+        C3["Deep learning · LSTM · GRU · MLP"]
     end
 
-    subgraph Eval ["📊 Evaluation"]
-        D1["Accuracy · F1 · AUC\nMcNemar · Diebold-Mariano\nBootstrap CI (n=1000)"]
+    subgraph Eval ["📊 Evaluation · Fase 6"]
+        D1["Accuracy · F1 · AUC · McNemar · Diebold–Mariano · Bootstrap CI"]
     end
 
     Data --> EDA --> ML --> Eval
@@ -235,3 +234,4 @@ Neuroscientist → Data Scientist
 ## License
 
 This project was submitted as a Master's Thesis. Code is made available for **educational and research purposes**. Any reuse requires attribution. Raw data sourced from Yahoo Finance (financial data) and GDELT (news data) under their respective terms of use.
+
