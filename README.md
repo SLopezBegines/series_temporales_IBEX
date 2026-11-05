@@ -1,237 +1,353 @@
-# IBEX35 Directional Forecasting — ML & Sentiment Analysis
-
-[![Language: Python](https://img.shields.io/badge/Python-%E2%89%A53.10-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
-[![Language: R](https://img.shields.io/badge/R-%E2%89%A54.0-276DC3.svg?logo=r&logoColor=white)](https://www.r-project.org/)
-[![Framework: scikit-learn](https://img.shields.io/badge/scikit--learn-ML-F7931E.svg)](https://scikit-learn.org/)
-[![Notebook: Jupyter](https://img.shields.io/badge/Jupyter-Colab%20ready-F37626.svg?logo=jupyter)](ML_Colab/pipeline_ML_ibex35.ipynb)
-[![Thesis PDF](https://img.shields.io/badge/Thesis-PDF-red?logo=adobe-acrobat-reader)](TFM_Santiago_Lopez_Begines.pdf)
-[![License: Academic](https://img.shields.io/badge/License-Academic%20use-blue.svg)](#license)
-
-> **Master's Thesis** — *Santiago López Begines, PhD*
-> *Prediction of IBEX35 closing direction via machine learning and financial news sentiment from GDELT*
-
-## Overview
-
-End-to-end pipeline for predicting the **daily directional movement** (up/down) of the Spanish IBEX35 index over a 20-year horizon (2004–2024). The project combines technical indicators, external market variables, and **sentiment scores extracted from >2,000 GDELT news batches** (~150 GB raw data) to assess whether news sentiment improves directional forecasting beyond pure price-based models.
-
-**Bottom line**: LightGBM achieves **55–62% directional accuracy** — significantly above the 50% random baseline. Sentiment adds marginal, inconsistent improvement; technical indicators (RSI, moving averages, past returns) remain the dominant predictors. Deep learning (LSTM, GRU) offers no clear advantage over traditional gradient boosting.
-
+---
+title: "Predicción de valores y tendencias de cierre del IBEX35 mediante *machine learning* y *webscraping*"
+subtitle: "Trabajo de fin de Máster"
+author: "Santiago López Begines, PhD"
+toc-title: "Índice"
+output: 
+  pdf_document: 
+    toc: true
+    number_sections: true
+    latex_engine: xelatex
+    highlight: tango
 ---
 
-## Pipeline Architecture
-```mermaid
-flowchart TD
-    subgraph Data ["📥 Data Collection"]
-        A1["IBEX35 + components · Yahoo Finance · 2004–2024"]
-        A2["External markets · S&P500 · EuroStoxx · Oil · Gold"]
-        A3["GDELT news · >2,000 ZIP files · ~150 GB"]
-    end
 
-    subgraph EDA ["🔬 EDA & Features · R · Quarto"]
-        B1["Fase 1–2 · RSI · MACD · Bollinger · Volatility · MAs"]
-        B2["Fase 3–4 · GDELT download · Parquet · Sentiment scoring"]
-        B3["Fase 5 · Feature integration · ~50 features · Scaling"]
-    end
+# Descripción
 
-    subgraph ML ["🤖 ML Pipeline · Python · Colab"]
-        C1["Baselines · ARIMA · Prophet · Naïve"]
-        C2["Gradient boosting · LightGBM · XGBoost · RF"]
-        C3["Deep learning · LSTM · GRU · MLP"]
-    end
+Trabajo Fin de Máster (diciembre 2025) del Máster en Big Data y Data Science aplicados a la Economía y a la Administración y Dirección de Empresas.
 
-    subgraph Eval ["📊 Evaluation · Fase 6"]
-        D1["Accuracy · F1 · AUC · McNemar · Diebold–Mariano · Bootstrap CI"]
-    end
+Desarrolla un sistema predictivo de los movimientos del IBEX35 mediante *machine learning*, integrando datos financieros (2004-2025) con análisis de sentimiento de noticias extraídas del proyecto GDELT (GKG 1.0).
 
-    Data --> EDA --> ML --> Eval
+Se implementaron **348 configuraciones experimentales** (clasificación y regresión) combinando:
 
-    style Data fill:#1e3a5f,color:#fff,stroke:#3b82f6
-    style EDA fill:#1e3a1e,color:#fff,stroke:#22c55e
-    style ML fill:#3a1e1e,color:#fff,stroke:#ef4444
-    style Eval fill:#3a2a1e,color:#fff,stroke:#f59e0b
-```
+-   **Modelos**: clásicos (ARIMA, ARIMAX, Prophet), lineales, basados en árboles, MLP y redes recurrentes (GRU, LSTM).
+-   **Datasets**: escalados / sin escalar, serie larga (2004-2024) / serie corta (2014-2024), con / sin sentimiento.
+-   **Horizontes**: 1, 5, 10 y 20 días.
 
----
+> **Nota sobre el enfoque inicial**: el diseño original contemplaba hacer *web scraping* de prensa financiera (Cinco Días, Expansión, Reuters, CNBC, etc.). Las limitaciones técnicas y legales (RSS limitados, anti-scraping, suscripciones de pago, heterogeneidad de formatos y falta de histórico) llevaron a adoptar GDELT como fuente primaria de sentimiento. GDELT usa análisis léxico tradicional (no modelos de lenguaje contextuales) y no está especializado en mercados financieros, por lo que el sentimiento obtenido es básico.
 
-## Key Results
+# Estructura del Proyecto
 
-| Model | Directional Accuracy | F1-Score | ROC-AUC |
-|---|---|---|---|
-| **LightGBM** (best) | **55–62%** | **0.57–0.63** | **0.58–0.64** |
-| XGBoost | 53–59% | 0.55–0.60 | 0.55–0.61 |
-| Random Forest | 52–57% | 0.53–0.58 | 0.54–0.60 |
-| LSTM / GRU | 51–56% | 0.52–0.57 | 0.52–0.58 |
-| ARIMA / Prophet | 50–52% | 0.50–0.53 | 0.50–0.53 |
-| Naïve baseline | ~50% | ~0.50 | ~0.50 |
-
-- **Sentiment impact**: marginal; GDELT tone improved accuracy by <2 pp in most conditions, and not consistently across bootstrap replicates (McNemar p > 0.05).
-- **Top features**: RSI, short-term moving averages, lagged daily returns, intraday range.
-- **Deep learning**: no statistically significant advantage over LightGBM despite higher complexity and training cost.
-
----
-
-## Project Structure
-
-```
+```         
 .
-├── TFM_Santiago_Lopez_Begines.pdf      # Master's thesis (full manuscript)
-├── README.md
-├── .gitignore
-│
-├── EDA_RStudio/                        # Exploratory analysis & preprocessing (R + Quarto)
-│   ├── Fase1.qmd                       # Financial data loading & EDA
-│   ├── Fase2.qmd                       # Feature engineering & correlation analysis
-│   ├── Fase3.qmd                       # GDELT download & Parquet conversion
-│   ├── Fase4.qmd                       # Sentiment scoring & feature integration
-│   ├── Fase5.qmd                       # Time-series model development (ARIMA, Prophet)
-│   ├── Fase6.qmd                       # Final validation & conclusions
-│   └── code/
-│       ├── R/                          # 25 modular R scripts (see below)
-│       ├── py/                         # Python helpers called from R via reticulate
-│       └── sh/                         # Shell scripts for batch GDELT processing
-│
-├── ML_Colab/                           # ML pipeline (Python, GPU-ready for Colab)
-│   ├── pipeline_ML_ibex35.ipynb        # Main notebook — full pipeline
-│   ├── environment.yml                 # Conda environment specification
-│   ├── setup_colab.py                  # Auto-configuration for Google Colab
-│   ├── setup_project.sh                # Project setup script
-│   └── scripts/
-│       ├── config.py                   # Global parameters (auto-detects Local/Colab/Kaggle)
-│       ├── aux_functions.py            # Data loading, metrics, utilities
-│       ├── modelos_ml.py               # XGBoost, LightGBM, RF, GRU, MLP
-│       ├── lstm_models.py              # LSTM architectures
-│       ├── evaluar_todos_modelos.py    # Comparative evaluation pipeline
-│       ├── validate_lightgbm.py        # LightGBM-specific validation
-│       ├── validation_main.py          # Test-set validation pipeline
-│       ├── main_pipeline.py            # End-to-end pipeline runner
-│       └── visualization.py            # Figures & training reports
-│
-└── Anexos/                             # Rendered annexes (HTML/PDF, not versioned)
-    ├── Anexo 1. Documentacion_variables_financieras.pdf
-    └── Anexo Fase1–6.*                 # Generated from .qmd (run to reproduce)
+├── TFM_Santiago_Lopez_Begines.pdf      # Memoria principal del TFM (documento de referencia)
+├── EDA_RStudio/                        # Análisis exploratorio y preprocesamiento (R)
+└── ML_Colab/                           # Pipeline de machine learning (Python)
 ```
 
----
+Los anexos a los que hace referencia la memoria (documentación técnica de variables y reportes de las fases) se generan a partir de los `.qmd` de `EDA_RStudio/`.
 
-## R Scripts — `EDA_RStudio/code/R/`
+------------------------------------------------------------------------
 
-### Initial configuration (00–06)
-| Script | Purpose |
-|---|---|
-| `00.libraries.R` | Load all required R packages |
-| `00.python_libraries.R` | Configure `reticulate` for Python–R integration |
-| `01.general_functions.R` | General-purpose helper functions |
-| `02.EDA_functions.R` | Exploratory analysis utilities |
-| `03.transfer_py_to_r.R` | Python ↔ R object transfer |
-| `04.financial_features.R` | Technical indicators: RSI, MACD, Bollinger Bands, MAs |
-| `05.external_features.R` | External market variables: S&P500, EuroStoxx, commodities |
-| `06.cleaning_features.R` | Outlier treatment and feature cleaning |
+# Fases del proyecto
 
-### GDELT processing (11–19)
-| Script | Purpose |
-|---|---|
-| `11.web_scraping_download_gdelt_parallel.R` | Parallel download of >2,000 GDELT ZIP files |
-| `convert_zip_to_parquet.R` | Batch ZIP → Parquet conversion |
-| `12.filter_parquet_files.R` | Initial IBEX35-relevance filtering |
-| `13.filter_script.R` | Advanced keyword-based filtering |
-| `14.consolidate_filtered_batches.R` | Batch consolidation |
-| `15.sentiment_score.R` | GDELT `tone` sentiment scoring |
-| `16.analysis_sentiment_counts_ibex35.R` | News frequency analysis |
-| `17.analysis_sentiment_intensity_ibex35.R` | Sentiment intensity analysis |
-| `18.Lags_sentimientos.R` | Temporal lags for sentiment variables |
-| `19.cleaning_sentiment.R` | Final sentiment variable cleaning |
+La memoria estructura el trabajo en seis fases, cada una con su documento Quarto (`FaseN.qmd`):
 
-### ML preparation (20–25)
-| Script | Purpose |
-|---|---|
-| `20.feature_scaling.R` | Feature normalisation for ML |
-| `21.forecasting_models.R` | ARIMA and Prophet time-series models |
-| `22.evaluate_naive_models.R` | Naïve baseline evaluation |
-| `23.compare_predictions.R` | McNemar & Diebold-Mariano statistical comparison |
-| `24.scaling_validation_data.R` | Validation-set scaling |
-| `25.verify_consistency.R` | Data integrity checks |
+| Fase | Contenido |
+|------------------------|------------------------------------------------|
+| **1** | Descarga y consolidación de datos: financieros (Yahoo Finance) y noticias GDELT |
+| **2** | Análisis exploratorio de índices bursátiles (calidad de datos, retornos, volatilidad, normalidad, estacionalidad, correlaciones, causalidad de Granger) y de las noticias GDELT (scores de sentimiento, conteos, intensidad) |
+| **3** | Ingeniería de características: variables técnicas y exógenas (97 variables), limpieza, reducción por correlación y Random Forest (44 variables finales), limpieza del sentimiento |
+| **4** | Unión de datos financieros y de sentimiento, creación de targets de clasificación y normalización Z-score |
+| **5** | Predicción: modelos clásicos (ARIMA, ARIMAX, Prophet) y modelos ML/DL; comparación estadística y evaluación frente a un modelo ingenuo (*naïve*) |
+| **6** | Validación final con datos nuevos (17-oct-2025 a 30-nov-2025) |
 
----
+------------------------------------------------------------------------
 
-## Reproducing the Analysis
+# 💻 EDA_RStudio/
 
-### Phase 1 — EDA & Feature Engineering (R)
+Análisis exploratorio, preprocesamiento y generación de features, implementado en R (con Python integrado mediante `reticulate`).
 
-```r
-# Install packages first
-source("EDA_RStudio/code/R/00.libraries.R")
+## Estructura
 
-# Run phases sequentially
-quarto::quarto_render("EDA_RStudio/Fase1.qmd")   # Financial EDA
-quarto::quarto_render("EDA_RStudio/Fase2.qmd")   # Feature engineering
-quarto::quarto_render("EDA_RStudio/Fase3.qmd")   # GDELT download (~150 GB, 12–24 h)
-quarto::quarto_render("EDA_RStudio/Fase4.qmd")   # Sentiment integration
-quarto::quarto_render("EDA_RStudio/Fase5.qmd")   # Time-series models
-quarto::quarto_render("EDA_RStudio/Fase6.qmd")   # Validation
+```         
+EDA_RStudio/
+├── Fase1.qmd - Fase6.qmd    # Documentos Quarto con análisis y reportes
+└── code/
+    ├── R/                    # Scripts R organizados numéricamente
+    ├── py/                   # Scripts Python auxiliares
+    └── sh/                   # Scripts shell para procesamiento batch
 ```
 
-> **Note**: Fase 3 downloads >2,000 GDELT archives (~150 GB). Running the remaining phases with pre-processed data skips this step.
+## Archivos `.qmd` (Quarto Markdown)
 
-### Phase 2 — ML Pipeline (Python)
+Documentos principales que contienen el análisis completo. Cada `.qmd`:
 
-**Option A — Google Colab (recommended, GPU)**
+-   Integra narrativa, código y visualizaciones.
+-   Llama a funciones específicas mediante `source()` desde `code/R/`.
+-   Genera reportes HTML y PDF reproducibles.
 
-1. Upload `ML_Colab/` to Google Drive
-2. Open `pipeline_ML_ibex35.ipynb` in Colab
-3. Run `setup_colab.py` to configure paths
-4. Execute cells sequentially
+**Orden de ejecución**: Fase1.qmd → Fase2.qmd → ... → Fase6.qmd
 
-**Option B — Local environment**
+Todo el código detallado de los modelos clásicos (ARIMA, ARIMAX, Prophet) de la Fase 5 se encuentra en `Fase5.qmd`.
 
-```bash
-# Create and activate conda environment
+## `code/R/`
+
+Scripts organizados numéricamente según el flujo del pipeline:
+
+### Configuración y features financieras (00-06)
+
+-   `00.libraries.R`: Carga de paquetes R necesarios
+-   `00.python_libraries.R`: Configuración de `reticulate` para integración Python-R
+-   `01.general_functions.R`: Funciones auxiliares generales
+-   `02.EDA_functions.R`: Funciones para análisis exploratorio
+-   `03.transfer_py_to_r.R`: Transferencia de los datos descargados en Python a R (guarda en `.RDS`, `.xlsx` y `.parquet`)
+-   `04.financial_features.R`: Indicadores técnicos derivados de OHLCV, con split temporal estricto (sin *look-ahead bias*)
+-   `05.external_features.R`: Variables de índices y activos externos (S&P500, DAX, FTSE100, Euronext100, VIX, petróleo, oro, EUR/USD) y Euribor 3M
+-   `06.cleaning_features.R`: Limpieza de variables (NAs, petróleo negativo en COVID-19), reducción por correlación/varianza (`reduce_by_correlation_variance()`) y ranking por Random Forest (`rank_features_by_importance()`)
+
+### Procesamiento GDELT (11-19)
+
+-   `11.web_scraping_download_gdelt_parallel.R`: Descarga paralela de los archivos diarios GDELT GKG 1.0 (`YYYYMMDD.gkg.csv.zip`)
+-   `convert_zip_to_parquet.R`: Conversión de ZIP a formato Parquet (se ejecuta desde `code/sh/step1_zip_to_parquet.sh`)
+-   `12.filter_parquet_files.R`: Filtrado de noticias relevantes para el IBEX35 con `duckdb`
+-   `13.filter_script.R`: Script de filtrado (criterios por temas, organizaciones y fuentes)
+-   `14.consolidate_filtered_batches.R`: Consolidación de los lotes filtrados en un único Parquet
+-   `15.sentiment_score.R`: Procesado de los seis campos de TONE y agregación diaria/mensual/anual (`daily_sentiment`)
+-   `16.analysis_sentiment_counts_ibex35.R`: Conteo de noticias positivas/negativas (cuatro categorías de sentimiento)
+-   `17.analysis_sentiment_intensity_ibex35.R`: Categorización de valencia, intensidad (polarity) y volatilidad (SD del tone)
+-   `18.Lags_sentimientos.R`: Lags y efectos retardados del sentimiento
+-   `19.cleaning_sentiment.R`: Limpieza final del sentimiento (forward fill, mediana al inicio, correlación y varianza)
+
+### Preparación y evaluación (20-25)
+
+-   `20.feature_scaling.R`: Normalización Z-score (parámetros estimados solo en train y aplicados a test)
+-   `21.forecasting_models.R`: Funciones de evaluación de pronósticos (RMSE, MAE, MAPE, *Direction Accuracy*) usadas con los modelos clásicos
+-   `22.evaluate_naive_models.R`: Evaluación de modelos reales vs. ingenuos (`evaluate_all_models()`): métricas, test binomial y criterios *naïve*
+-   `23.compare_predictions.R`: Comparación estadística de modelos: McNemar + bootstrap (clasificación) y Diebold-Mariano + bootstrap (regresión)
+-   `24.scaling_validation_data.R`: Cálculo de features y escalado de los datos de validación con los parámetros del entrenamiento
+-   `25.verify_consistency.R`: Verificación de que las features de validación coinciden con las del modelo
+
+## `code/py/`
+
+Scripts Python auxiliares llamados desde R:
+
+-   `ibex_downloader.py`: Descarga histórica de datos del IBEX35 (Yahoo Finance)
+-   `stocks_downloader.py`: Función `download_ibex()` para la descarga de índices con `yfinance`
+-   `stocks_list.py`: Diccionario `stocks_to_download` con los tickers utilizados
+-   `validate_model.py`: Carga, verificación de features y evaluación de modelos entrenados sobre los datos de validación
+
+## `code/sh/`
+
+Scripts shell para procesamiento eficiente:
+
+-   `step1_zip_to_parquet.sh`: Conversión masiva de archivos GDELT ZIP a Parquet (ejecutado desde terminal por limitaciones de memoria en RStudio)
+-   `02b_prefilter_fast.sh`: Pre-filtrado rápido de datos
+-   `bootstrap_system_deps.sh`: Instalación de dependencias del sistema
+
+------------------------------------------------------------------------
+
+# 🤖 ML_Colab/
+
+Pipeline de machine learning implementado en Python para ejecución en Google Colab (GPU).
+
+## Estructura
+
+```         
+ML_Colab/
+├── pipeline_ML_ibex35.ipynb    # Notebook principal con pipeline completo
+├── README.md                   # Documentación específica del pipeline ML
+├── environment.yml             # Especificación del entorno conda
+├── setup_colab.py              # Configuración automática para Colab
+├── setup_project.sh            # Script de configuración del proyecto
+└── scripts/                    # Módulos Python del pipeline
+```
+
+## `scripts/`
+
+### Configuración y utilidades
+
+-   `config.py`: Parámetros globales y configuración del proyecto
+-   `aux_functions.py`: Funciones auxiliares (carga de datos, métricas, etc.)
+
+### Modelos implementados
+
+-   `modelos_ml.py`: Modelos lineales, de árboles y MLP (Linear, Ridge, Logistic, Random Forest, XGBoost, LightGBM, Ensemble/Stacking, MLP)
+-   `lstm_models.py`: Modelos recurrentes (GRU y LSTM; arquitecturas small, medium, large, etc.)
+-   `evaluate_naive_models.py`: Evaluación de modelos reales vs. ingenuos
+
+### Evaluación y validación
+
+-   `evaluar_todos_modelos.py`: Pipeline de evaluación comparativa de todos los modelos
+-   `validate_lightgbm.py`: Validación específica del modelo LightGBM
+-   `validation_main.py`: Pipeline de validación con datos nuevos
+
+### Análisis y visualización
+
+-   `visualization.py`: Generación de gráficos y reportes visuales
+-   `analize_log.py`: Análisis de logs de entrenamiento
+-   `visualize_models_structure.py`: Visualización de arquitecturas de redes neuronales
+
+### Ejecución
+
+-   `main_pipeline.py`: Script principal para ejecutar el pipeline completo
+
+------------------------------------------------------------------------
+
+# Requisitos
+
+## R (EDA_RStudio/)
+
+-   R 4.5.2 y RStudio 2025.09.2
+-   Paquetes principales:
+    -   `tidyverse`, `lubridate`, `zoo`: Manipulación de datos y series temporales
+    -   `duckdb`, `arrow`: Filtrado y manejo de archivos Parquet
+    -   `reticulate`: Integración Python-R
+    -   `caret`, `randomForest`: Reducción de variables y ranking por importancia
+    -   `forecast`, `prophet`: Modelos clásicos (ARIMA/ARIMAX, Prophet) y test de Diebold-Mariano
+    -   `fredr`: Descarga del Euribor 3M (requiere API key propia de FRED)
+    -   `quarto`: Generación de reportes
+
+## Python (ML_Colab/)
+
+-   Python 3.13.5
+-   Entorno especificado en `ML_Colab/environment.yml`
+-   Librerías principales:
+    -   `yfinance`: Descarga de datos financieros
+    -   `pandas`, `numpy`: Manipulación de datos
+    -   `scikit-learn`: Modelos lineales, Random Forest, MLP, stacking, preprocesamiento y métricas
+    -   `xgboost`, `lightgbm`: Modelos gradient boosting
+    -   `tensorflow`, `keras`: Redes recurrentes (GRU, LSTM)
+
+------------------------------------------------------------------------
+
+# Ejecución
+
+## Análisis Exploratorio y Preprocesamiento (R)
+
+1.  **Configurar entorno R**: Instalar paquetes listados en `00.libraries.R`
+2.  **Ejecutar análisis por fases**: Renderizar documentos Quarto en orden secuencial
+
+``` r
+   quarto::quarto_render("EDA_RStudio/Fase1.qmd")
+   quarto::quarto_render("EDA_RStudio/Fase2.qmd")
+   # ... continuar con Fase3-6
+```
+
+Los archivos `.qmd` ejecutan automáticamente los scripts necesarios mediante `source()`.
+
+### Descarga y procesamiento de GDELT
+
+La conversión de ZIP a Parquet se ejecuta desde terminal (en RStudio se agotaba la memoria). Editar antes las variables `INPUT_DIR`, `OUTPUT_DIR`, `LOG_FILE` y `NUM_CORES` (2 cores para 16 GB de RAM):
+
+``` bash
+bash EDA_RStudio/code/sh/step1_zip_to_parquet.sh
+```
+
+| Paso | Script | Salida | Tamaño aprox. | Tiempo estimado |
+|---------------|---------------|---------------|---------------|---------------|
+| Descarga CSV.ZIP | `11.web_scraping_download_gdelt_parallel.R` | `gdelt_raw` | 144.9 GB (4283 archivos) | 3-4 h |
+| Conversión a Parquet | `step1_zip_to_parquet.sh` + `convert_zip_to_parquet.R` | `gdelt_parquet` | 189.7 GB | 4-6 h |
+| Filtrado | `12.filter_parquet_files.R` | `gdelt_filtered` | 65.1 MB (reducción del 99.6 %) | 1-2 h |
+| Consolidación | `14.consolidate_filtered_batches.R` | `gdelt_filtered_consolidated` | 30.8 MB | 1-2 min |
+
+## Pipeline de Machine Learning (Python)
+
+### Opción 1: Google Colab (recomendado)
+
+1.  Subir carpeta `ML_Colab/` a Google Drive
+2.  Abrir `pipeline_ML_ibex35.ipynb` en Colab
+3.  Ejecutar `setup_colab.py` para configurar entorno
+4.  Ejecutar celdas secuencialmente
+
+### Opción 2: Entorno local
+
+``` bash
+# Crear entorno conda
 conda env create -f ML_Colab/environment.yml
 conda activate tfm_ml
 
-# Run full pipeline
+# Ejecutar pipeline completo
 python ML_Colab/scripts/main_pipeline.py
 
-# Or run evaluation only
+# O ejecutar módulos específicos
 python ML_Colab/scripts/evaluar_todos_modelos.py
 ```
 
----
+------------------------------------------------------------------------
 
-## Data & Reproducibility Notes
+# Metodología
 
-- **Raw GDELT data** (~150 GB) is not versioned. Download scripts are in `EDA_RStudio/code/R/11–14`.
-- **Processed datasets** and **trained models** (`.joblib`, `.keras`) are excluded from the repo. Available upon request.
-- **Full reproduction** requires approximately 12–24 h for the R pipeline and 4–8 h for GPU training on Colab.
-- Financial data (IBEX35, S&P500, etc.) is downloaded automatically via Yahoo Finance in Fase 1.
+## Datos
 
----
+-   **Financieros**: IBEX35 y 10 índices/activos externos, de enero de 2004 a octubre de 2025 (≈21.8 años), descargados con `yfinance`:
+    -   Índices: S&P 500, DAX, SBF 120, Euronext 100, Nikkei 225, FTSE 100, VIX
+    -   Divisa y materias primas: EUR/USD, oro (futuros), petróleo WTI (futuros)
+    -   Euribor 3M (FRED, serie `IR3TIB01EZM156N`)
+-   **Sentimiento**: GDELT 1.0 Global Knowledge Graph (GKG), del 2014-01-01 al 2025-10-16 (4283 archivos diarios, 144.9 GB). Tras el filtrado: 66 377 registros, 4257 días únicos y 136 745 artículos.
+-   **Filtrado de noticias**: tres criterios booleanos (temas económicos/bursátiles en `THEMES`; empresas del IBEX35 en `ORGANIZATIONS`; fuentes españolas en `SOURCES`/`SOURCEURLS`). Una noticia es válida si cumple al menos 2 de los 3.
+-   **Variables de sentimiento**: los seis componentes de TONE (tone, positive, negative, polarity, activity, self-reference) agregados a nivel diario.
 
-## Tech Stack
+## División temporal y datasets
 
-| Layer | Tools |
-|---|---|
-| Financial data | `quantmod`, `TTR`, `yahoofinancer`, `yfinance` |
-| GDELT processing | `arrow` (Parquet), `parallel`, custom R/shell scripts |
-| Sentiment | GDELT `AvgTone` field, lagged aggregates |
-| Feature engineering | `tidyverse`, `dplyr`, `lubridate` |
-| Python–R bridge | `reticulate` |
-| Time-series baselines | `forecast` (ARIMA), `prophet` |
-| ML models | `scikit-learn`, `xgboost`, `lightgbm` |
-| Deep learning | `tensorflow`, `keras` (LSTM, GRU, MLP) |
-| Evaluation | `scipy` (McNemar), custom bootstrap CI |
-| Reporting | Quarto (`.qmd`), `ggplot2`, `plotly` |
+-   **Train**: 2004-01-01 a 2024-10-15 · **Test**: 2024-10-16 a 2025-10-16 · **Validación final**: 2025-10-17 a 2025-11-30.
+-   Normalización Z-score con parámetros calculados solo en train (sin *look-ahead bias*).
+-   Tres conjuntos de datos, cada uno en versión escalada y sin escalar:
+    -   `financial_long`: variables financieras, serie larga (2004-2024)
+    -   `financial`: variables financieras, serie corta (2014-2024)
+    -   `sentiment`: variables financieras + sentimiento GDELT (2014-2024)
 
----
+## Features
 
-## Author
+-   Generadas: **97 variables** (técnicas, de calendario y exógenas).
+-   Selección: limpieza (−5) → correlación \> 85 % (−30) → Random Forest con 90 % de importancia acumulada (−18) → **44 variables finales**.
+-   Indicadores técnicos: retornos logarítmicos, volatilidad, velocidad y aceleración, RSI, ROC, estocástico, OBV, medias móviles, rangos.
+-   Variables exógenas: retornos, momentum y volatilidad de S&P500, DAX, FTSE100 y Euronext100; VIX; petróleo; oro; EUR/USD; Euribor 3M.
+-   Sentimiento: estadísticos diarios de TONE y sus lags (se elimina `mean_tone_score` por correlación con `median_tone_score`).
 
-**Santiago López Begines, PhD**
-Neuroscientist → Data Scientist
-[Portfolio](https://slopezbegines.github.io/projects/ibex35-prediction/) · [GitHub](https://github.com/SLopezBegines) · [LinkedIn](https://linkedin.com/in/santibegines) · [ORCID](https://orcid.org/0000-0001-8809-8919)
+## Problemas y modelos
 
----
+Dos problemas, cada uno a 1, 5, 10 y 20 días:
 
-## License
+-   **Clasificación**: dirección del retorno (`direction_next`, 0 = baja, 1 = sube).
+-   **Regresión**: retorno futuro (`returns_next`).
 
-This project was submitted as a Master's Thesis. Code is made available for **educational and research purposes**. Any reuse requires attribution. Raw data sourced from Yahoo Finance (financial data) and GDELT (news data) under their respective terms of use.
+| Problema | Datos | Modelos | Nº |
+|---------------|---------------|-----------------------------|---------------|
+| Regresión | Scaled | Linear, Ridge, Random Forest, XGBoost, LightGBM, Ensemble, MLP, GRU, LSTM | 9 |
+| Regresión | Unscaled | Random Forest, XGBoost, LightGBM, Ensemble, GRU, LSTM | 6 |
+| Clasificación | Scaled | Logistic, Random Forest, XGBoost, LightGBM, Ensemble, MLP, GRU, LSTM | 8 |
+| Clasificación | Unscaled | Random Forest, XGBoost, LightGBM, Ensemble, GRU, LSTM | 6 |
 
+Total: 3 datasets × 4 targets × modelos = **348 configuraciones**. Además, se evalúan los modelos clásicos univariantes ARIMA, ARIMAX (con retornos de S&P500, DAX, VIX, petróleo y EUR/USD) y Prophet sobre el retorno.
+
+## Evaluación
+
+-   **Regresión**: RMSE, MAE, R², precisión direccional (signo del retorno).
+-   **Clasificación**: Accuracy, Balanced Accuracy, Precision, Recall, F1-Score, ROC-AUC, Cohen's Kappa.
+-   **Comparaciones estadísticas**: McNemar (clasificación), Diebold-Mariano (regresión) e intervalos de confianza por bootstrap.
+-   **Evaluación frente a modelo ingenuo (*naïve*)**: test binomial frente a predecir siempre la clase mayoritaria, Cohen's Kappa \> 0.1, Balanced Accuracy \> 0.52 y F1 \> 0.1. Un modelo es "REAL" solo si supera significativamente al clasificador ingenuo.
+
+------------------------------------------------------------------------
+
+# Resultados Principales
+
+-   **Análisis exploratorio**: tres periodos de volatilidad extrema (crisis 2008, deuda europea 2011-2012 y COVID-19). Correlaciones del IBEX35 con Euronext100 (0.87), DAX (0.82) y FTSE100 (0.79), y negativa con el VIX (−0.42). Causalidad de Granger (5 lags) significativa para S&P500, VIX, EUR/USD y DAX. Retornos no normales (curtosis ≈ 13.7).
+-   **Precisión direccional**: entre el 53 % y el 62 %. Los modelos GRU y LSTM son los más consistentes (62.22 % y 61.97 %); en clasificación, Random Forest y Ensemble alcanzan 0.63 de accuracy.
+-   **Modelos clásicos**: ARIMA(0,0,0), ARIMA con media y Prophet obtienen ≈ 59.84 % solo porque predicen siempre "sube" (en el test el 59.84 % de los días son de subida). Se clasifican como ingenuos.
+-   **Sentimiento GDELT**: aporta mejoras marginales y generalmente no significativas. Solo 13 de 60 comparaciones de regresión (21.7 %, Diebold-Mariano) y 3 de 56 de clasificación (5.4 %, McNemar) mejoran al añadir sentimiento; la mejora más destacada es de ≈ 7 % en LightGBM (clasificación sin escalar, `direction_next`; regresión escalada, `returns_next_10`). En el ranking de Random Forest no aparece ninguna variable de sentimiento entre las 30 primeras.
+-   **Horizonte y profundidad histórica**: sin diferencias consistentes y estadísticamente significativas entre horizontes (1, 5, 10, 20 días) ni entre serie corta y larga.
+-   **Modelos con capacidad predictiva real**: tras los criterios *naïve* solo 10 de los modelos evaluados superan al clasificador ingenuo (p. ej., LightGBM clasificación `direction_next_5` con datos escalados; XGBoost y LightGBM en regresión).
+-   **Validación final (17-oct-2025 a 30-nov-2025)**: los modelos seleccionados obtienen accuracy direccional de 36-46 % (LightGBM clasificación 46.15 %, LightGBM regresión 42.31 %, XGBoost regresión 36.36 %), por debajo del baseline de predecir siempre "sube". Indica sobreajuste y limitada generalización.
+-   **Sesgo alcista**: todos los modelos tienden a predecir subidas, lo que limita su aplicabilidad práctica.
+
+**Conclusión de la memoria**: la predicción direccional del IBEX35 mediante *machine learning* y análisis de sentimiento básico de GDELT presenta limitaciones fundamentales; los modelos apenas superan el azar y la mayoría no supera significativamente a un modelo ingenuo.
+
+**Líneas futuras**: NLP más sofisticado (transformers, análisis por compañía), datos alternativos de mayor frecuencia, balanceo de clases, evaluación por regímenes de volatilidad y extensión a otros índices.
+
+------------------------------------------------------------------------
+
+# Notas Importantes
+
+-   Los datos GDELT originales (≈ 145 GB en ZIP, ≈ 190 GB en Parquet) y los datasets procesados no se incluyen por tamaño.
+-   Los modelos entrenados (`.joblib`, `.keras`) están disponibles bajo petición.
+-   La descarga de Euribor requiere una API key propia de FRED (`fredr_set_key()`); no debe incluirse en el repositorio.
+-   Parte del código de R y Python se programó con la ayuda de Claude Sonnet 4.5 (Anthropic).
+-   Reproducción completa: descarga y procesado de GDELT (≈ 8-12 h, ver tabla en *Ejecución*) y entrenamiento de modelos de ML/DL en GPU (Colab).
+
+------------------------------------------------------------------------
+
+# Licencia
+
+Este proyecto académico se entrega como Trabajo Fin de Máster.
+El código está disponible para fines educativos.
